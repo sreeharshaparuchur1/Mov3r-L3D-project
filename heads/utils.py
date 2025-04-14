@@ -1,3 +1,9 @@
+# Copyright (c) Meta Platforms, Inc. and affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+
 import torch
 import torch.nn as nn
 
@@ -51,6 +57,10 @@ def make_sincos_pos_embed(embed_dim: int, pos: torch.Tensor, omega_0: float = 10
 
     emb = torch.cat([emb_sin, emb_cos], dim=1)  # (M, D)
     return emb.float()
+
+
+# Inspired by https://github.com/microsoft/moge
+
 
 def create_uv_grid(
     width: int, height: int, aspect_ratio: float = None, dtype: torch.dtype = None, device: torch.device = None

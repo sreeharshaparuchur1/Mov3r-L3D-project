@@ -238,7 +238,7 @@ class DPTHead(nn.Module):
             mode="bilinear",
             align_corners=True,
         )
-        print(out.shape)
+        # print(out.shape)
         if self.pos_embed:
             out = self._apply_pos_embed(out, W, H)
 
@@ -246,12 +246,11 @@ class DPTHead(nn.Module):
             return out.view(B, S, *out.shape[1:])
 
         out = self.scratch.output_conv2(out)
-        print(out.shape)
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
-        print(preds.shape, out.shape)
         preds = preds.view(B, S, *preds.shape[1:])
         conf = conf.view(B, S, *conf.shape[1:])
-        return preds, conf
+        # combined = torch.cat([preds, conf], dim=-1)
+        return preds,conf
 
     def _apply_pos_embed(self, x: torch.Tensor, W: int, H: int, ratio: float = 0.1) -> torch.Tensor:
         """
@@ -495,25 +494,24 @@ def custom_interpolate(
 if __name__ == '__main__':
 
     # --- Configuration ---
-    B = 2                # Batch size
-    S = 1                # Sequence length (number of frames)
+    B = 8                # Batch size
+    S = 32                # Sequence length (number of frames)
     H, W = 224, 224      # Image dimensions
-    patch_size = 14
+    patch_size = 16
     dim_in = 768         # Transformer embedding dim
     patch_tokens = (H // patch_size) * (W // patch_size)  # tokens per frame
     # --- Dummy tokens from transformer layers ---
-    aggregated_tokens_list = [
-        torch.randn(B, S, patch_tokens, dim_in)  # No extra tokens
-    ]
-
+    aggregated_tokens_list = [torch.randn(B, S, patch_tokens, dim_in)]
+    import pdb
+    pdb.set_trace()
     # --- Dummy image input ---
-    images = torch.randn(B, S, 3, H, W)
-
+    images = torch.randn(B*S, 1, 3, H, W)
+    
     # --- Model ---
-    model = DPTHead(dim_in=dim_in)
+    model = DPTHead(dim_in=dim_in, patch_size=patch_size)
 
     # --- Forward pass ---
-    output = model(aggregated_tokens_list, images, patch_start_idx=0)
+    output = model([torch.randn(B*S, 1, patch_tokens, dim_in)], images, patch_start_idx=0)
 
 
     preds, conf = output

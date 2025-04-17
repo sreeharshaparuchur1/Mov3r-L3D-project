@@ -9,6 +9,10 @@
 
 - Training Losses + Distribuited Training Script
 
+
+loss
+pose - initial emendding from first frame. cosnine sim with next frame's embedding
+
 * karan:
 * Tanya:
 * Yash:

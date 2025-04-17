@@ -5,3 +5,7 @@ __pycache__/
 pretrained_weights/
 output_depth_maps/
 logs/
+data/
+depth_anything_v2/
+croco/pretrained_models
+

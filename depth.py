@@ -84,9 +84,9 @@ class DepthEmbedder(torch.nn.Module):
         Returns:
             torch.Tensor: Point clouds of shape (B, H, W, 3)
         """
-        B, _, H, W = depth_map.shape
+        
+        B, H, W, _ = depth_map.shape
         device = depth_map.device
-
         # Create pixel coordinate grid
         u = torch.arange(W, device=device).view(1, 1, W).expand(B, H, W)
         v = torch.arange(H, device=device).view(1, H, 1).expand(B, H, W)
@@ -99,11 +99,11 @@ class DepthEmbedder(torch.nn.Module):
         f = focal_length_px.view(B, 1, 1)
 
         # Convert to camera coordinates
-        Z = depth_map
+        Z = depth_map.squeeze(-1) 
         X = (u - cx) * Z / f
         Y = (v - cy) * Z / f
         
-        point_cloud = torch.cat((X, Y, Z), dim=-1)  # (B, H, W, 3)
+        point_cloud = torch.stack((X, Y, Z), dim=-1)  # (B, H, W, 3)
         # Optional: Normalize per-point cloud or apply further filtering
         # point_cloud = normalize_pointcloud(point_cloud)
 
@@ -117,10 +117,12 @@ class DepthEmbedder(torch.nn.Module):
         return normalized_point_cloud
 
     def forward(self, x, intrinsic_depth):
+        # import pdb; pdb.set_trace()
         focal_length_px = intrinsic_depth[:, 0, 0]
         #unproject depth to point cloud
         point_cloud = self.pixel_to_pointcloud(x, focal_length_px)
-        point_cloud = point_cloud.permute(0,3,1,2)
+        point_cloud = point_cloud.permute(0,3,1,2).to(dtype=torch.float32)
+        self.patch_embed_point_cloud = self.patch_embed_point_cloud.to(point_cloud.device)
         x, pos = self.patch_embed_point_cloud(point_cloud)
 
         for i in range(len(self.dec_blocks_pc)):
@@ -161,8 +163,8 @@ if __name__ == "__main__":
             print(f"Depth map saved to {path_depthanything}")
 
     if test_depth_embedder:
-        depth= torch.randn(2, 224, 224, 1).cuda()
-        flen = torch.randn(2, 4, 4).cuda()
+        depth= torch.randn(256, 224, 224, 1).cuda()
+        flen = torch.randn(256, 4, 4).cuda()
         
         depth_embedder = DepthEmbedder(patch_embed_cls='PatchEmbedDust3R', img_size=224, patch_size=16, dec_embed_dim=768, pos_embed='cosine', pc_dec_depth=8)
         depth_embedder = depth_embedder.cuda()

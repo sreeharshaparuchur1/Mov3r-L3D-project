@@ -15,7 +15,7 @@ from dino.dino_embedder import DINOEmbedder
 from cross_attention import PatchWiseCrossAttentionDecoder, DUSt3RAsymmetricCrossAttention
 from heads.dpthead import DPTHead
 from depth import DepthEmbedder
-from scannet_dataset_v4 import ScanNetPreprocessor, ScanNetMemoryDataset
+from scannet_dataset_v5 import ScanNetPreprocessor, ScanNetMemoryDataset
 from losses.losses import ConfAlignPointMapRegLoss, ConfAlignDepthRegLoss
 
 def get_config():
@@ -35,7 +35,6 @@ def get_config():
     parser.add_argument('--pc_dec_depth', type=int, default=8)
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--gamma', type=float, default=0.999)
     parser.add_argument('--device_ids', nargs='+', type=int, default=[0, 1, 2], help='List of GPU device IDs')
     parser.add_argument('--log_dir', type=str, default='/data/kmirakho/git/Mov3r-L3D-project/logs/')
     parser.add_argument('--model_dir', type=str, default='/data/kmirakho/git/Mov3r-L3D-project/models/')
@@ -82,6 +81,8 @@ class Mov3r:
         # Initialize ViT model for self attention
         self.depth_embedder = DepthEmbedder(patch_embed_cls='PatchEmbedDust3R', img_size=224, patch_size=16, dec_embed_dim=768, pos_embed=args.pos_embed, pc_dec_depth=self.pc_dec_depth)
 
+        import pdb
+        pdb.set_trace()
         self.dino_patch_embed = DINOEmbedder(patch_embed='dinov2_vitb14_reg', img_size=224, patch_size=16)
         # self.dino_patch_embed.load_state_dict(torch.load(args.dino_encoder, map_location=self.device))
         dino_model_state_dict = torch.load(args.dino_encoder, map_location=self.device)
@@ -134,9 +135,6 @@ class Mov3r:
             {'params': self.depth_head.parameters(), 'lr': 2e-4, 'weight_decay': 1e-6}
             ], lr=1e-4, weight_decay=1e-5)
         
-
-        #scheduler 
-        self.scheduler = torch.optim.lr_scheduler.ExponentialLR(optimizer=self.optimizer, gamma=args.gamma)
         # Mixed precision setup
         self.scaler = torch.cuda.amp.GradScaler(enabled=True)
 
@@ -161,16 +159,21 @@ class Mov3r:
         )
         return data_loader, sampler
     
-    def get_loss(self, predict_pointmap, predict_depth, depth , intrinsic_depth, weights = [0.01,0.01,1], mask=False):
+    def get_loss(self, features, images, depth , intrinsic_depth , weights = [0.01,0.01,1], mask=False):
         # Image [B,S,C,H,W ]
         # Depth [B,S, H,W,C]
         # features (B, S, patch_tokens, dim_in)
         # instrinsic shape [B,S,4,4]
-        
         depth = depth.permute(0, 1, 3, 4, 2)
         assert depth.shape[-1] == 1
+        assert images.shape[2] == 3
         assert intrinsic_depth.shape[-1] == 4
         assert intrinsic_depth.shape[-2] == 4
+        
+        predict_depth, predict_pointmap = self.dpt_head(features,images)
+        assert predict_depth[0].shape[-1] == 1
+        assert predict_pointmap[0].shape[-1] == 3
+
 
         loss_pointmap = ConfAlignPointMapRegLoss(depth, predict_pointmap, intrinsic_depth, weights[0])
         loss_depth = ConfAlignDepthRegLoss(depth, predict_depth,  weights[1])
@@ -217,46 +220,39 @@ class Mov3r:
             start_time = time.time()
 
             for batch_idx, batch in enumerate(epoch_bar):
-                rgb, depth, _, intrinsic = (batch["rgb"].to(self.device, non_blocking=True), batch["depth"].to(self.device, non_blocking=True), batch["pose"].to(self.device, non_blocking=True), batch
-                ["intrinsics"])
+                rgb, depth, pred_depth, _, intrinsic = (batch["rgb"].to(self.device, non_blocking=True), batch["depth"].to(self.device, non_blocking=True), 
+                                                        batch["pred_depth"].to(self.device, non_blocking=True), batch["pose"].to(self.device, non_blocking=True), batch["intrinsics"])
                 B, S, C, H, W = rgb.shape
                 rgb = rgb.view(-1, H, W, C)
 
                 _, _, H, W = depth.shape
                 depth = depth.view(-1, H, W, 1)
+
+                pred_depth = pred_depth.view(-1, H, W, 1)
+
                 intrinsic_depth = intrinsic['intrinsic_depth'].to(self.device, non_blocking=True)
                 intrinsic_depth = intrinsic_depth.repeat_interleave(repeats=S, dim=0)
 
                 assert rgb.shape[-1] == 3
                 assert depth.shape[-1] == 1
+                assert pred_depth.shape[-1] == 1
                 
-                pc_embedding = self.depth_embedder(depth, intrinsic_depth)
+                pc_embedding = self.depth_embedder(pred_depth, intrinsic_depth)
 
                 rgb = rgb.permute(0, 3, 1, 2)
                 with torch.no_grad():
                     patch_embedding = self.dino_patch_embed(rgb)
                 
                 features = self.dust3r_cross(patch_embedding, pc_embedding)
-                features = features.view(B*S, 1, features.shape[-2], features.shape[-1])
-                rgb = rgb.view(B*S, 1, C, H, W)
+                features = features.view(B, S, features.shape[-2], features.shape[-1])
+                rgb = rgb.view(B, S, C, H, W)
                 depth = depth.view(B, S, 1, H, W)
 
-                predict_depth, predict_pointmap = self.dpt_head(features,rgb)
-                predict_depth = list(predict_depth)
-                predict_pointmap = list(predict_pointmap)
-                predict_depth[0] = predict_depth[0].view(B, S, H, W, 1)
-                predict_depth[1] = predict_depth[1].view(B, S, H, W, 1)
-
-                predict_pointmap[0] = predict_pointmap[0].view(B, S, H, W, C)
-                predict_pointmap[1] = predict_pointmap[1].view(B, S, H, W, 1)
-                assert predict_depth[0].shape[-1] == 1
-                assert predict_pointmap[0].shape[-1] == 3
-
                 self.optimizer.zero_grad(set_to_none=True)
-                
+
                 with torch.cuda.amp.autocast():
                     #calculate loss
-                    loss = self.get_loss(predict_pointmap, predict_depth, depth , intrinsic_depth)
+                    loss = self.get_loss(features, rgb, depth , intrinsic_depth)
             
                 # self.scaler.scale(loss)
                 # self.scaler.step(self.optimizer)
@@ -378,7 +374,7 @@ if __name__ == "__main__":
 
     # Step 1: Preprocess and load dataset to memory
     preprocessor = ScanNetPreprocessor(
-        root_dir=args.dataset_path,
+        root_dir='/data/kmirakho/l3dProject/scannetv2',
         output_h5_path='scannet_preprocessed.h5',
         max_scenes=1,  # Limit to 100 scenes for memory efficiency
         num_workers=8,   # Adjust based on your system

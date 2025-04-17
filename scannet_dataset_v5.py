@@ -14,6 +14,7 @@ from functools import lru_cache
 from torchvision import transforms
 from concurrent.futures import ThreadPoolExecutor
 import time
+import dust3r.datasets.utils.cropping as cropping
 
 class ScanNetPreprocessor:
     """Optimized preprocessor to load entire ScanNet dataset into memory"""
@@ -79,7 +80,54 @@ class ScanNetPreprocessor:
             print(f"WARNING: Dataset may not fit in memory!")
             print(f"Consider reducing number of scenes or using disk-based storage.")
     
-    def process_frame(self, frame_id, scene_dir, rgb_only):
+    def _crop_resize_if_necessary(self, image, depthmap, pred_depth, intrinsics, resolution, rng=None, info=None):
+        """ This function:
+            - first downsizes the image with LANCZOS inteprolation,
+              which is better than bilinear interpolation in
+        """
+        if not isinstance(image, Image.Image):
+            image = Image.fromarray(image)
+
+        # downscale with lanczos interpolation so that image.size == resolution
+        # cropping centered on the principal point
+        W, H = image.size
+        cx, cy = intrinsics[:2, 2].round().astype(int)
+        min_margin_x = min(cx, W - cx)
+        min_margin_y = min(cy, H - cy)
+        # assert min_margin_x > W/5, f'Bad principal point in view={info}'
+        # assert min_margin_y > H/5, f'Bad principal point in view={info}'
+        # the new window will be a rectangle of size (2*min_margin_x, 2*min_margin_y) centered on (cx,cy)
+        l, t = cx - min_margin_x, cy - min_margin_y
+        r, b = cx + min_margin_x, cy + min_margin_y
+        crop_bbox = (l, t, r, b)
+        image, depthmap, pred_depth, intrinsics = cropping.crop_image_depthmap(image, depthmap, pred_depth, intrinsics, crop_bbox)
+
+        # transpose the resolution if necessary
+        W, H = image.size  # new size
+        assert resolution[0] >= resolution[1]
+        if H > 1.1 * W:
+            # image is portrait mode
+            resolution = resolution[::-1]
+        elif 0.9 < H / W < 1.1 and resolution[0] != resolution[1]:
+            # image is square, so we chose (portrait, landscape) randomly
+            if rng.integers(2):
+                resolution = resolution[::-1]
+
+        # high-quality Lanczos down-scaling
+        target_resolution = np.array(resolution)
+        # if self.aug_crop > 1:
+        #     target_resolution += rng.integers(0, self.aug_crop)
+        image, depthmap, pred_depth, intrinsics = cropping.rescale_image_depthmap(image, depthmap, pred_depth, intrinsics, target_resolution)
+
+        # actual cropping (if necessary) with bilinear interpolation
+        intrinsics2 = cropping.camera_matrix_of_crop(intrinsics, image.size, resolution, offset_factor=0.5)
+        crop_bbox = cropping.bbox_from_intrinsics_in_out(intrinsics, intrinsics2, resolution)
+        image, depthmap, pred_depth, intrinsics2 = cropping.crop_image_depthmap(image, depthmap, pred_depth[:, :, None], intrinsics, crop_bbox)
+
+        return image, depthmap, pred_depth, intrinsics2
+
+
+    def process_frame(self, frame_id, scene_dir, rgb_only, intrinsic_depth):
         """Process a single frame and return its data
         
         Args:
@@ -106,14 +154,18 @@ class ScanNetPreprocessor:
             depthmap[~np.isfinite(depthmap)] = 0
             frame_data['depth'] = depthmap
             
+            pred_depth_path = os.path.join('output_depth_maps', os.path.basename(scene_dir), f'{frame_id}.npz')
+            pred_depthmap = np.load(pred_depth_path)
+            pred_depthmap = pred_depthmap['depth'].astype(np.float32) / 1000
+            pred_depthmap = pred_depthmap[:, :, None]
+            # pred_depthmap[~np.isfinite(pred_depthmap)] = 0
+            frame_data['pred_depth'] = pred_depthmap
+
             # Load pose
             pose_path = os.path.join(scene_dir, 'pose', f'{frame_id}.txt')
             pose = np.loadtxt(pose_path)
-            frame_data['pose'] = pose
-
-            # image, depthmap, intrinsics = self._crop_resize_if_necessary(
-            #     image, depthmap, intrinsics, resolution=224) #hardcode to 224
-            
+            frame_data['pose'] = pose    
+            frame_data['rgb'], frame_data['depth'], frame_data['pred_depth'], frame_data['intrinsics'] = self._crop_resize_if_necessary(frame_data['rgb'], frame_data['depth'], frame_data['pred_depth'], intrinsic_depth, resolution=(224, 224)) #hardcode to 224
         return frame_data
         
     def process_scene(self, scene_dir):
@@ -134,6 +186,7 @@ class ScanNetPreprocessor:
         
         if not self.rgb_only:
             frames_data['depth'] = []
+            frames_data['pred_depth'] = []
             frames_data['pose'] = []
         
         # Load camera intrinsics once per scene
@@ -148,11 +201,12 @@ class ScanNetPreprocessor:
             'extrinsic_color': np.loadtxt(extrinsic_color_path),
             'extrinsic_depth': np.loadtxt(extrinsic_depth_path)
         }
+        intrinsic_depth = frames_data['intrinsics']['intrinsic_depth']
         
         # Process all frames in parallel using ThreadPoolExecutor
         with ThreadPoolExecutor(max_workers=self.num_workers) as executor:
             # Create a list of arguments for each frame
-            frame_args = [(frame_id, scene_dir, self.rgb_only) for frame_id in frame_ids]
+            frame_args = [(frame_id, scene_dir, self.rgb_only, intrinsic_depth) for frame_id in frame_ids]
             
             # Process frames in parallel and collect results
             # frame_results = list(tqdm(
@@ -169,8 +223,9 @@ class ScanNetPreprocessor:
             
             if not self.rgb_only:
                 frames_data['depth'].append(frame_data['depth'])
+                frames_data['pred_depth'].append(frame_data['pred_depth'])
                 frames_data['pose'].append(frame_data['pose'])
-        
+        frames_data['intrinsics']['intrinsic_depth'] = frames_data['intrinsics']['intrinsic_depth']
         return frames_data
     
     def load_dataset(self, save_to_disk=True, return_data=False):
@@ -212,6 +267,7 @@ class ScanNetPreprocessor:
             
             if not self.rgb_only:
                 memory_dataset[scene_id]['depth'] = torch.from_numpy(np.stack(scene_data['depth'])).float()
+                memory_dataset[scene_id]['pred_depth'] = torch.from_numpy(np.stack(scene_data['pred_depth'])).float()
                 memory_dataset[scene_id]['pose'] = torch.from_numpy(np.stack(scene_data['pose'])).float()
         
         # Save to disk if requested
@@ -262,7 +318,13 @@ class ScanNetPreprocessor:
                         compression=self.compression,
                         chunks=True
                     )
-                    
+                    # Save predicted depth maps with compression
+                    scene_group.create_dataset(
+                        'pred_depth', 
+                        data=scene_data['pred_depth'],
+                        compression=self.compression,
+                        chunks=True
+                    )
                     # Save poses
                     scene_group.create_dataset(
                         'pose', 
@@ -338,6 +400,7 @@ class ScanNetMemoryDataset(Dataset):
         if not self.rgb_only:
             # Get depth maps and poses for all frames at once
             sample['depth'] = scene_data['depth'][start_frame:start_frame+self.num_frames]
+            sample['pred_depth'] = scene_data['pred_depth'][start_frame:start_frame+self.num_frames]
             sample['pose'] = scene_data['pose'][start_frame:start_frame+self.num_frames]
         
         # Add intrinsics (same for all frames in scene)
@@ -354,7 +417,6 @@ def main():
     # Define transforms
     data_transforms = transforms.Compose([
         # transforms.ToTensor(),
-        transforms.resize((224, 224)),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
     
@@ -362,7 +424,7 @@ def main():
     preprocessor = ScanNetPreprocessor(
         root_dir='/data/kmirakho/l3dProject/scannetv2',
         output_h5_path='scannet_preprocessed.h5',
-        max_scenes=8,  # Limit to 100 scenes for memory efficiency
+        max_scenes=1,  # Limit to 100 scenes for memory efficiency
         num_workers=8,   # Adjust based on your system
         rgb_only=False,  # Set to True to only load RGB images
         compression="lzf" # Fast compression

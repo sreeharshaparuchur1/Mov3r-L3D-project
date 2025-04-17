@@ -20,21 +20,23 @@ def ConfAlignPointMapRegLoss(gt_batch, prediction, intrinsics, alpha=0.01, eps=1
     Returns:
         Scalar loss.
     """
+    prediction_pm = prediction[0]
+    prediction_pm_c = prediction[1]
 
-    assert prediction.shape[-1] == 4
+    assert prediction_pm.shape[-1] == 3
     assert gt_batch.shape[-1] == 1
     assert intrinsics.shape[-1] == 4
-    assert intrinsics.shape[-2] == 3
+    assert intrinsics.shape[-2] == 4
 
-    B, K, H, W, _ = prediction.shape
+    B, K, H, W, _ = prediction_pm.shape
 
     # Convert Prediction depth to point Map without scaling 
-    Z = prediction[..., 2]
+    Z = prediction_pm[:,:,:,:, 2]
 
-    u = torch.arange(W, device=prediction.device).view(1, 1, 1, W).expand(B, K, H, W)
-    v = torch.arange(H, device=prediction.device).view(1, 1, H, 1).expand(B, K, H, W)
+    u = torch.arange(W, device=prediction_pm.device).view(1, 1, 1, W).expand(B, K, H, W)
+    v = torch.arange(H, device=prediction_pm.device).view(1, 1, H, 1).expand(B, K, H, W)
 
-    
+    intrinsics = intrinsics.view(B, K, 4, 4)  # Reshape to [B, K, 4, 4]
     fx = intrinsics[:, :, 0, 0].unsqueeze(-1).unsqueeze(-1)  # (B, K, 1, 1)
     fy = intrinsics[:, :, 1, 1].unsqueeze(-1).unsqueeze(-1)
     cx = intrinsics[:, :, 0, 2].unsqueeze(-1).unsqueeze(-1)
@@ -51,9 +53,9 @@ def ConfAlignPointMapRegLoss(gt_batch, prediction, intrinsics, alpha=0.01, eps=1
     Y = (v - cy) * Z / fy
 
     point_map = torch.stack([X, Y, Z], dim=-1)  # (B, K, H, W, 3)
-
-    x_hat = prediction[...,:3]       # Predicted 3D pointmap
-    c = prediction[..., 3:4]           # Confidence, keep dimensions [B, K, H, W, 1]
+    
+    x_hat = prediction_pm     # Predicted 3D pointmap
+    c = prediction_pm_c           # Confidence, keep dimensions [B, K, H, W, 1]
 
     gt = point_map                      # Ground truth 3D pointmap
 
@@ -82,9 +84,10 @@ def ConfAlignDepthRegLoss(gt_batch, prediction, alpha=0.01, eps=1e-6):
     Returns:
         Scalar loss.
     """
-
-    x_hat = prediction[..., 0].unsqueeze(-1)       # Predicted Depth
-    c = prediction[..., 1].unsqueeze(-1)            # Confidence, keep dimensions [B, K, H, W, 1]
+    prediction_d = prediction[0]
+    prediction_d_c = prediction[1]
+    x_hat = prediction_d       # Predicted Depth
+    c = prediction_d_c  # Confidence, keep dimensions [B, K, H, W, 1]
 
     gt = gt_batch                      # Ground truth Depth
 
@@ -129,4 +132,5 @@ def test_losses():
     loss_depth = ConfAlignDepthRegLoss(gt_depth, pred_depth)
     print("Depth Loss:", loss_depth.item())
 
-test_losses()
+if __name__ == "__main__":
+    test_losses()

@@ -174,6 +174,7 @@ class Mov3r:
 
         loss_pointmap = ConfAlignPointMapRegLoss(depth, predict_pointmap, intrinsic_depth, weights[0])
         loss_depth = ConfAlignDepthRegLoss(depth, predict_depth,  weights[1])
+        loss_pose = ConfAlignPoseLoss(pose, predicted_pose)
 
         return loss_pointmap + loss_depth
 

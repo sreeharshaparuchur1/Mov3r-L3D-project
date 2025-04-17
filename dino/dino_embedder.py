@@ -82,7 +82,7 @@ class DINOEmbedder(nn.Module):
 
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
-        return x
+        return patch_tokens
     
 if __name__ == "__main__":
     rgb= torch.randn(1, 3, 224, 224).cuda()

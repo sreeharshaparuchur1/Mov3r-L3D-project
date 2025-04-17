@@ -2,3 +2,6 @@
 __pycache__/
 *.pyc
 *.pyo
+pretrained_weights/
+output_depth_maps/
+logs/

@@ -42,7 +42,7 @@ class DPTHead(nn.Module):
         conf_activation: str = "expp1",
         features: int = 256,
         out_channels: List[int] = [256, 512, 1024, 1024],
-        intermediate_layer_idx: List[int] = [4, 11, 17, 23],
+        intermediate_layer_idx: List[int] = [0, 0, 0, 0],
         pos_embed: bool = True,
         feature_only: bool = False,
         down_ratio: int = 1,
@@ -238,7 +238,7 @@ class DPTHead(nn.Module):
             mode="bilinear",
             align_corners=True,
         )
-
+        print(out.shape)
         if self.pos_embed:
             out = self._apply_pos_embed(out, W, H)
 
@@ -246,8 +246,9 @@ class DPTHead(nn.Module):
             return out.view(B, S, *out.shape[1:])
 
         out = self.scratch.output_conv2(out)
+        print(out.shape)
         preds, conf = activate_head(out, activation=self.activation, conf_activation=self.conf_activation)
-
+        print(preds.shape, out.shape)
         preds = preds.view(B, S, *preds.shape[1:])
         conf = conf.view(B, S, *conf.shape[1:])
         return preds, conf
@@ -491,34 +492,31 @@ def custom_interpolate(
 
 
 
-# if __name__ == '__main__':
+if __name__ == '__main__':
 
     # --- Configuration ---
-# B = 2                # Batch size
-# S = 1                # Sequence length (number of frames)
-# H, W = 224, 224      # Image dimensions
-# patch_size = 14
-# dim_in = 768         # Transformer embedding dim
-# patch_tokens = (H // patch_size) * (W // patch_size)  # tokens per frame
-# # --- Dummy tokens from transformer layers ---
-# aggregated_tokens_list = [
-#     torch.randn(B, S, patch_tokens, dim_in)  # No extra tokens
-#     for _ in range(24)  # supports intermediate_layer_idx like [4, 11, 17, 23]
-# ]
+    B = 2                # Batch size
+    S = 1                # Sequence length (number of frames)
+    H, W = 224, 224      # Image dimensions
+    patch_size = 14
+    dim_in = 768         # Transformer embedding dim
+    patch_tokens = (H // patch_size) * (W // patch_size)  # tokens per frame
+    # --- Dummy tokens from transformer layers ---
+    aggregated_tokens_list = [
+        torch.randn(B, S, patch_tokens, dim_in)  # No extra tokens
+    ]
 
-# # --- Dummy image input ---
-# images = torch.randn(B, S, 3, H, W)
+    # --- Dummy image input ---
+    images = torch.randn(B, S, 3, H, W)
 
-# # --- Model ---
-# model = DPTHead(dim_in=dim_in)
+    # --- Model ---
+    model = DPTHead(dim_in=dim_in)
 
-# # --- Forward pass ---
-# output = model(aggregated_tokens_list, images, patch_start_idx=0)
+    # --- Forward pass ---
+    output = model(aggregated_tokens_list, images, patch_start_idx=0)
 
 
-# preds, conf = output
-# print("Preds shape:", preds.shape)
-# print("Conf shape:", conf.shape)
-# else:
-
+    preds, conf = output
+    print("Preds shape:", preds.shape)
+    print("Conf shape:", conf.shape)
 

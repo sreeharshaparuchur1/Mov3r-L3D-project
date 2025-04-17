@@ -204,6 +204,44 @@ class PatchWiseCrossAttentionDecoder(nn.Module):
         return x1, x2
 
 
+# class DUSt3RAsymmetricCrossAttention(nn.Module):
+#     """
+#     DUSt3R's asymmetric cross-attention implementation with two decoders.
+#     """
+#     def __init__(self, encoder_dim=1024, decoder_dim=768, depth=12, num_heads=12, dropout=0.0):
+#         super().__init__()
+        
+#         # Input to decoder projection
+#         self.decoder_embed = nn.Linear(encoder_dim, decoder_dim)
+        
+#         # Two separate decoders with CrossBlocks
+#         self.dec_blocks1 = nn.ModuleList([
+#             CrossBlock(decoder_dim, num_heads, 4.0, dropout)
+#             for _ in range(depth)
+#         ])
+        
+#         self.dec_blocks2 = nn.ModuleList([
+#             CrossBlock(decoder_dim, num_heads, 4.0, dropout)
+#             for _ in range(depth)
+#         ])
+        
+#     def forward(self, x1, x2):
+#         """
+#         x1: tokens from first view [batch_size, seq_len, encoder_dim]
+#         x2: tokens from second view [batch_size, seq_len, encoder_dim]
+#         """
+#         # Project to decoder dimension
+#         x1 = self.decoder_embed(x1)
+#         x2 = self.decoder_embed(x2)
+        
+#         # Apply decoder blocks with cross-attention
+#         for block1, block2 in zip(self.dec_blocks1, self.dec_blocks2):
+#             x1_new = block1(x1, x2)  # View 1 attends to View 2
+#             x2_new = block2(x2, x1)  # View 2 attends to View 1
+#             x1, x2 = x1_new, x2_new
+            
+#         return x1, x2
+    
 class DUSt3RAsymmetricCrossAttention(nn.Module):
     """
     DUSt3R's asymmetric cross-attention implementation with two decoders.
@@ -220,24 +258,22 @@ class DUSt3RAsymmetricCrossAttention(nn.Module):
             for _ in range(depth)
         ])
         
-        self.dec_blocks2 = nn.ModuleList([
-            CrossBlock(decoder_dim, num_heads, 4.0, dropout)
-            for _ in range(depth)
-        ])
+        # self.dec_blocks2 = nn.ModuleList([
+        #     CrossBlock(decoder_dim, num_heads, 4.0, dropout)
+        #     for _ in range(depth)
+        # ])
         
-    def forward(self, x1, x2):
+    def forward(self, feat_depth, feat_rgb):
         """
         x1: tokens from first view [batch_size, seq_len, encoder_dim]
         x2: tokens from second view [batch_size, seq_len, encoder_dim]
         """
         # Project to decoder dimension
-        x1 = self.decoder_embed(x1)
-        x2 = self.decoder_embed(x2)
+        x1 = self.decoder_embed(feat_depth)
+        x2 = self.decoder_embed(feat_rgb)
         
         # Apply decoder blocks with cross-attention
-        for block1, block2 in zip(self.dec_blocks1, self.dec_blocks2):
-            x1_new = block1(x1, x2)  # View 1 attends to View 2
-            x2_new = block2(x2, x1)  # View 2 attends to View 1
-            x1, x2 = x1_new, x2_new
-            
-        return x1, x2
+        for block1 in self.dec_blocks1:
+            x1_new = block1(x1, x2)  # View 2 attends to View 1
+            x1 = x1_new
+        return x1

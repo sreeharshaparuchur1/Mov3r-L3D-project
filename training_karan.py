@@ -17,6 +17,8 @@ from heads.dpthead import DPTHead
 from depth import DepthEmbedder
 from scannet_dataset_v5 import BufferedSceneDataset, ScanNetPreprocessor, ScanNetMemoryDataset
 from losses.losses import ConfAlignPointMapRegLoss, ConfAlignDepthRegLoss
+import logging
+import sys
 import gc
 
 def get_config():
@@ -174,6 +176,21 @@ class Mov3r:
         self.local_rank = local_rank
         self.device = torch.device(f"cuda:{self.local_rank}")
         
+        self.log_file = os.path.join(self.log_dir, f"{self.run_name}_{timestamp}.log")
+        logging.basicConfig(
+            filename=self.log_file,
+            level=logging.INFO,
+            format='%(asctime)s - %(levelname)s - %(message)s',
+            handlers=[
+                logging.StreamHandler(sys.stdout),
+                logging.FileHandler(self.log_file)
+            ]
+        )
+        if self.local_rank == 0:
+            logging.info("Starting training...")
+            logging.info(f"Arguments: {args}")
+            logging.info(f"World size: {dist.get_world_size()}")
+
         #Preprocess and load dataset to memory
         self.buffer_scene = BufferedSceneDataset(
             root_dir=args.dataset_path,
@@ -272,8 +289,8 @@ class Mov3r:
                 bar_format='{l_bar}{bar:20}{r_bar}',
                 leave=True,
                 position=self.local_rank,
-                disable=not (self.local_rank == 0)  # Only show the bar for rank 0
-                # disable=False,  # Always show the bar
+                disable=not (self.local_rank == 0),
+                file=self.log_file,
                 )
 
             #set avg loss to zero
@@ -342,7 +359,11 @@ class Mov3r:
             self.scheduler.step()
             self.dist.barrier()
             epoch += 1
-    
+
+        if self.local_rank == 0:
+            logging.info("Training completed.")    
+            self.log_file.close()
+            
     def log_data(self, epoch):
         self.writer.add_scalar('Avg_loss', self.avg_loss, epoch)
         self.writer.add_scalar('grad_norm', self.g_norm, epoch)

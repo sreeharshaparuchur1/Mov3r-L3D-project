@@ -46,6 +46,7 @@ def get_config():
 
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=1e-4)
+    parser.add_argument('--clip_grad', type=float, default=50.0)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--gamma', type=float, default=0.995)
     parser.add_argument('--device_ids', nargs='+', type=int, default=[0, 1, 2], help='List of GPU device IDs')
@@ -206,6 +207,7 @@ class Mov3r:
         self.model.load_dino_patch_embed(self.device)
         self.model.to(self.device)
         
+        #distributed training
         self.model = torch.nn.parallel.DistributedDataParallel(self.model, device_ids=[local_rank], output_device=local_rank, find_unused_parameters=True)
 
         #optimizer
@@ -298,10 +300,15 @@ class Mov3r:
                 
                 self.optimizer.zero_grad(set_to_none=True)
                 
-                #calculate loss
-                loss = self.model.module.loss(rgb, pred_depth, depth, intrinsic_depth, weights = [0.01,0.01,1])
+                with torch.cuda.amp.autocast():
+                    #calculate loss
+                    loss = self.model.module.loss(rgb, pred_depth, depth, intrinsic_depth, weights = [0.01,0.01,1])
                 
                 loss.backward()
+                
+                # Clip gradients after synchronization
+                self.g_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=args.clip_grad)
+                
                 self.optimizer.step()
                 
                 #sync losses across all GPUs
@@ -310,8 +317,9 @@ class Mov3r:
                 self.avg_loss = (loss_tensor.item() / dist.get_world_size() + self.avg_loss * batch_idx) / (batch_idx + 1)
 
                 epoch_bar.set_postfix(
-                    avg_loss=f'{self.avg_loss:.5f}',
-                    lr=f'{self.optimizer.param_groups[0]["lr"]:.5f}'
+                    avg_loss=f'{self.avg_loss:.2f}',
+                    lr=f'{self.optimizer.param_groups[0]["lr"]:.5f}',
+                    grad_norm=f'{self.g_norm:.2f}',
                 )
             
             if epoch % args.save_after == 0 and self.local_rank == 0:
@@ -326,6 +334,7 @@ class Mov3r:
     
     def log_data(self, epoch):
         self.writer.add_scalar('Avg_loss', self.avg_loss, epoch)
+        self.writer.add_scalar('grad_norm', self.g_norm, epoch)
         #optimizer
         self.writer.add_scalar('lr', self.optimizer.param_groups[0]['lr'], epoch)
         for name, param in self.model.module.dust3r_cross.named_parameters():
@@ -378,6 +387,51 @@ class Mov3r:
         print(f'Loaded checkpoint from {args.load_from_ckpt} at epoch {epoch} with avg_loss {avg_loss}')
         return epoch
 
+    def eval(self):
+        # Set the model to evaluation mode
+        self.model.eval()
+
+        # Load the evaluation dataset
+        eval_dataset = self.buffer_scene.fetch_eval_dataset()
+        eval_loader, _ = self.create_distributed_loader(eval_dataset)
+
+        # Evaluation loop
+        with torch.no_grad():
+            for batch_idx, batch in tqdm(eval_loader, desc=f'Evaluating...(rank {self.local_rank})', bar_format='{l_bar}{bar:20}{r_bar}', leave=True, position=self.local_rank, disable=not (self.local_rank == 0)):
+                rgb, depth, pred_depth, _, intrinsic = (batch["rgb"].to(self.device, non_blocking=True), batch["depth"].to(self.device, non_blocking=True),
+                                                    batch["pred_depth"].to(self.device, non_blocking=True), batch["pose"].to(self.device, non_blocking=True), batch["intrinsics"])
+                # Perform evaluation here
+                _, _, C, H, W = rgb.shape
+                rgb = rgb.view(-1, H, W, C).contiguous()
+
+                _, _, H, W = depth.shape
+                depth = depth.view(-1, H, W, 1).contiguous()
+
+                pred_depth = pred_depth.view(-1, H, W, 1).contiguous()        
+
+                assert rgb.shape[-1] == 3
+                assert depth.shape[-1] == 1
+                assert pred_depth.shape[-1] == 1
+
+                intrinsic_depth = intrinsic['intrinsic_depth'].to(self.device, non_blocking=True)
+                intrinsic_depth = intrinsic_depth.repeat_interleave(repeats=args.context_length, dim=0)
+
+                # Forward pass
+                predict_depth, predict_pointmap = self.model(rgb, pred_depth, intrinsic_depth)
+
+                # Calculate evaluation metrics
+                #TODO: later
+
+                # Save evaluation results
+                #predit_depth is am image with 1 channel
+                # predict_depth = predict_depth.view(-1, H, W, 1).contiguous()
+                # Save the predicted depth map
+                # save_path = os.path.join(self.log_dir, f'predicted_depth_{batch_idx}.png')
+                # save_image(predict_depth, save_path)
+                pass
+
+                
+                
 if __name__ == "__main__":
     args = get_config()
 

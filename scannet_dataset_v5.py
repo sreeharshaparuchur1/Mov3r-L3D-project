@@ -19,8 +19,8 @@ import dust3r.datasets.utils.cropping as cropping
 class ScanNetPreprocessor:
     """Optimized preprocessor to load entire ScanNet dataset into memory"""
     
-    def __init__(self, root_dir, output_h5_path=None, max_scenes=None, 
-                 num_workers=None, rgb_only=False, compression="lzf"):
+    def __init__(self, scene_dirs, output_h5_path=None, max_scenes=None, 
+                 num_workers=None, scene_indices=None, rgb_only=False, compression="lzf"):
         """
         Args:
             root_dir: Path to ScanNet dataset directory
@@ -30,12 +30,10 @@ class ScanNetPreprocessor:
             rgb_only: Whether to only load RGB images
             compression: HDF5 compression filter ("lzf" for speed, "gzip" for size)
         """
-        self.root_dir = root_dir
-        self.output_h5_path = output_h5_path or "scannet_preprocessed.h5"
-        self.scene_dirs = sorted(glob(os.path.join(root_dir, '*')))
+        self.scene_dirs = scene_dirs[scene_indices]
         
-        if max_scenes:
-            self.scene_dirs = self.scene_dirs[:max_scenes]
+        # if max_scenes:
+        #     self.scene_dirs = self.scene_dirs[:max_scenes]
 
         self.num_scenes = len(self.scene_dirs)
         self.rgb_only = rgb_only
@@ -392,16 +390,19 @@ class ScanNetMemoryDataset(Dataset):
         sample = {}
         
         # Get RGB images for all frames in sequence at once
-        # frame_indices = [start_frame + (i * self.frame_skip) for i in range(self.num_frames)]
-        rgb = scene_data['rgb'][start_frame:start_frame+self.num_frames]
+        frame_indices = np.arange(self.num_frames) * self.frame_skip + start_frame
+        frame_indices = frame_indices.astype(int)
+        # add frame skip - start_frame + (i * self.frame_skip) for i in range(self.num_frames)]
+        rgb = scene_data['rgb'][frame_indices]
 
         sample['rgb'] = rgb
+        # print(frame_indices)
         
         if not self.rgb_only:
             # Get depth maps and poses for all frames at once
-            sample['depth'] = scene_data['depth'][start_frame:start_frame+self.num_frames]
-            sample['pred_depth'] = scene_data['pred_depth'][start_frame:start_frame+self.num_frames]
-            sample['pose'] = scene_data['pose'][start_frame:start_frame+self.num_frames]
+            sample['depth'] = scene_data['depth'][frame_indices]
+            sample['pred_depth'] = scene_data['pred_depth'][frame_indices]
+            sample['pose'] = scene_data['pose'][frame_indices]
         
         # Add intrinsics (same for all frames in scene)
         intrinsics = {}
@@ -411,6 +412,48 @@ class ScanNetMemoryDataset(Dataset):
         
         return sample
 
+class BufferedSceneDataset(Dataset):
+    def __init__(self, root_dir, max_scenes=10, num_workers=8,num_frames=32, frame_skip=1, 
+                 data_transforms=None):
+        self.max_scenes = max_scenes
+        self.num_workers = num_workers
+        self.data_transforms = data_transforms
+        self.num_frames=num_frames
+        self.frame_skip=frame_skip
+
+        # Scene management
+        self.all_scene_dirs = sorted(glob(os.path.join(root_dir, '*')))
+        self.all_scene_dirs = np.array(self.all_scene_dirs)
+        self.total_scenes = len(self.all_scene_dirs)
+        self.current_idx = 0
+    
+    def _load_scene_batch(self, scene_indices):
+        """Load batch of scenes into memory"""
+        preprocessor = ScanNetPreprocessor(
+            scene_dirs=self.all_scene_dirs,
+            max_scenes=len(scene_indices),
+            scene_indices=scene_indices,
+            num_workers=self.num_workers,
+            rgb_only=False
+        )
+        return preprocessor.load_dataset(save_to_disk=False, return_data=True)
+    
+    def fetch_dataset(self):
+        # Load scenes and create dataset
+        next_indices = np.arange(self.current_idx, min(self.current_idx + self.max_scenes, self.total_scenes))
+        new_data = self._load_scene_batch(next_indices)
+        dataset = ScanNetMemoryDataset(
+            dataset_source=new_data,
+            num_frames=self.num_frames,
+            transforms=self.data_transforms,
+            frame_skip=self.frame_skip,
+            rgb_only=False
+            )
+        if self.current_idx+len(next_indices) > self.total_scenes:
+            np.random.shuffle(self.all_scene_dirs)
+        self.current_idx = (self.current_idx + len(next_indices))%self.total_scenes
+    
+        return dataset
 
 # Example usage
 def main():
@@ -419,63 +462,98 @@ def main():
         # transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    
-    # Step 1: Preprocess and load dataset to memory
-    preprocessor = ScanNetPreprocessor(
-        root_dir='/data/kmirakho/l3dProject/scannetv2',
-        output_h5_path='scannet_preprocessed.h5',
-        max_scenes=1,  # Limit to 100 scenes for memory efficiency
-        num_workers=8,   # Adjust based on your system
-        rgb_only=False,  # Set to True to only load RGB images
-        compression="lzf" # Fast compression
-    )
-    
-    # Option 1: Save to disk for future use
-    # h5_path = preprocessor.load_dataset(save_to_disk=False, return_data=False)
-    
-    # Option 2: Load directly to memory
-    memory_dataset = preprocessor.load_dataset(save_to_disk=False, return_data=True)
-    
-    # Step 2: Create memory dataset
-    # From disk (more memory efficient)
-    # h5_path='scannet_preprocessed.h5'
-    # dataset = ScanNetMemoryDataset(
-    #     dataset_source=h5_path,
-    #     num_frames=5,
-    #     transforms=data_transforms,
-    #     frame_skip=1,
-    #     rgb_only=False
-    # )
-    
-    # From memory (fastest, but requires most RAM)
-    dataset = ScanNetMemoryDataset(
-        dataset_source=memory_dataset,
+    # Usage
+    buffer_scene = BufferedSceneDataset(
+        root_dir='/data/kmirakho/l3d_proj/scannetv2',
+        max_scenes=10,
+        num_workers=8,
         num_frames=32,
-        transforms=data_transforms,
         frame_skip=1,
-        rgb_only=False
+        data_transforms=data_transforms
     )
-    
-    # Step 3: Create optimized DataLoader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=8,
-        shuffle=True,
-        num_workers=4,  # For dataset in memory, fewer workers needed
-        pin_memory=True,
-        prefetch_factor=8,
-        persistent_workers=True
-    )
-    
-    # Example training loop
+
     for epoch in range(10):
+        dataset = buffer_scene.fetch_dataset()
+        
+        # Step 3: Create optimized DataLoader
+        dataloader = DataLoader(
+            dataset,
+            batch_size=4,
+            shuffle=True,
+            num_workers=4,  # For dataset in memory, fewer workers needed
+            pin_memory=True,
+            prefetch_factor=8,
+            persistent_workers=True
+        )
         epoch_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}')
         for batch_idx, batch in enumerate(epoch_bar):
-            # Process batch here
-            # import pdb
-            # pdb.set_trace()
             time.sleep(0.1)
-            pass
+            break
+
+# # Example usage
+# def main():
+#     # Define transforms
+#     data_transforms = transforms.Compose([
+#         # transforms.ToTensor(),
+#         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
+#     ])
+    
+#     # Step 1: Preprocess and load dataset to memory
+#     preprocessor = ScanNetPreprocessor(
+#         root_dir='/data/kmirakho/l3dProject/scannetv2',
+#         output_h5_path='scannet_preprocessed.h5',
+#         max_scenes=1,  # Limit to 100 scenes for memory efficiency
+#         num_workers=8,   # Adjust based on your system
+#         rgb_only=False,  # Set to True to only load RGB images
+#         compression="lzf" # Fast compression
+#     )
+    
+#     # Option 1: Save to disk for future use
+#     # h5_path = preprocessor.load_dataset(save_to_disk=False, return_data=False)
+    
+#     # Option 2: Load directly to memory
+#     memory_dataset = preprocessor.load_dataset(save_to_disk=False, return_data=True)
+    
+#     # Step 2: Create memory dataset
+#     # From disk (more memory efficient)
+#     # h5_path='scannet_preprocessed.h5'
+#     # dataset = ScanNetMemoryDataset(
+#     #     dataset_source=h5_path,
+#     #     num_frames=5,
+#     #     transforms=data_transforms,
+#     #     frame_skip=1,
+#     #     rgb_only=False
+#     # )
+    
+#     # From memory (fastest, but requires most RAM)
+#     dataset = ScanNetMemoryDataset(
+#         dataset_source=memory_dataset,
+#         num_frames=32,
+#         transforms=data_transforms,
+#         frame_skip=1,
+#         rgb_only=False
+#     )
+    
+#     # Step 3: Create optimized DataLoader
+#     dataloader = DataLoader(
+#         dataset,
+#         batch_size=8,
+#         shuffle=True,
+#         num_workers=4,  # For dataset in memory, fewer workers needed
+#         pin_memory=True,
+#         prefetch_factor=8,
+#         persistent_workers=True
+#     )
+    
+#     # Example training loop
+#     for epoch in range(10):
+#         epoch_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}')
+#         for batch_idx, batch in enumerate(epoch_bar):
+#             # Process batch here
+#             # import pdb
+#             # pdb.set_trace()
+#             time.sleep(0.1)
+#             pass
 
 
 if __name__ == "__main__":

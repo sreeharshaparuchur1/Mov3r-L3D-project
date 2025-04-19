@@ -62,6 +62,7 @@ def get_config():
     parser.add_argument('--eval_model', type=str, default='/data/kmirakho/offline_data/model/data_10_40_640/model_20.pth')
     parser.add_argument('--dataset_path', type=str, default='/data/kmirakho/l3d_proj/scannetv2')
     parser.add_argument('--dino_encoder', type=str, default='/data/kmirakho/l3dProject/git/Mov3r-L3D-project/pretrained_weights/dinov2_vitb14_reg4_pretrain.pth')
+    parser.add_argument('--depth_embedder', type=str, default='./pretrained_weights/align3r_depthanything.pth')
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     return args
@@ -129,7 +130,7 @@ class UnifiedModel(torch.nn.Module):
         return predict_depth, predict_pointmap
     
     def load_depth_embedder(self, device):
-        depth_state_dict = torch.load('pretrained_weights/align3r_depthanything.pth', map_location=device)
+        depth_state_dict = torch.load(args.depth_embedder, map_location=device)
         filtered_state_dict = {k: v for k, v in depth_state_dict['model'].items() if k.startswith('dec_blocks_pc')}
         self.depth_embedder.dec_blocks_pc.load_state_dict({k.replace('dec_blocks_pc.', ''): v for k, v in filtered_state_dict.items() if k.startswith('dec_blocks_pc.')}, strict=False)
         del depth_state_dict, filtered_state_dict
@@ -300,9 +301,9 @@ class Mov3r:
                 
                 self.optimizer.zero_grad(set_to_none=True)
                 
-                with torch.cuda.amp.autocast():
-                    #calculate loss
-                    loss = self.model.module.loss(rgb, pred_depth, depth, intrinsic_depth, weights = [0.01,0.01,1])
+
+                #calculate loss
+                loss = self.model.module.loss(rgb, pred_depth, depth, intrinsic_depth, weights = [0.01,0.01,1])
                 
                 loss.backward()
                 
@@ -315,7 +316,7 @@ class Mov3r:
                 loss_tensor = loss.detach().clone()
                 dist.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
                 self.avg_loss = (loss_tensor.item() / dist.get_world_size() + self.avg_loss * batch_idx) / (batch_idx + 1)
-
+                self.g_norm = (self.g_norm / dist.get_world_size() + self.g_norm * batch_idx) / (batch_idx + 1)
                 epoch_bar.set_postfix(
                     avg_loss=f'{self.avg_loss:.2f}',
                     lr=f'{self.optimizer.param_groups[0]["lr"]:.5f}',

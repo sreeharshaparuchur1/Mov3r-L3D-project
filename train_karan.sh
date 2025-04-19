@@ -32,13 +32,14 @@ CUDA_VISIBLE_DEVICES=0,1,3 python -m torch.distributed.run --nproc_per_node=3 --
     --pc_dec_depth 8 \
     --seed 9 \
     --save_after 50\
-    --dino_encoder /data/kmirakho/l3d_proj/Mov3r-L3D-project/pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
-    --log_dir /data/kmirakho/l3d_proj/Mov3r-L3D-project/logs/ \
-    --model_dir /data/kmirakho/l3d_proj/Mov3r-L3D-project/models/ \
-    --ckpt_dir /data/kmirakho/l3d_proj/Mov3r-L3D-project/ckpt/ \
-    --eval_model /data/kmirakho/l3d_proj/Mov3r-L3D-project/models/model_20.pth \
+    --depth_embedder ./pretrained_weights/align3r_depthanything.pth \
+    --dino_encoder ./pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
+    --log_dir ./logs/ \
+    --model_dir ./models/ \
+    --ckpt_dir ./ckpt/ \
+    --eval_model ./models/model_20.pth \
     --dataset_path /data/kmirakho/l3d_proj/scannetv2 \
-    # --load_from_ckpt /data/kmirakho/l3d_proj/Mov3r-L3D-project/ckpt/train_embed_smallv3/checkpoint-0.pth \
+    # --load_from_ckpt ./ckpt/train_embed_smallv3/checkpoint-0.pth \
     # --run_eval \
     # --load_model \
 
@@ -65,10 +66,10 @@ CUDA_VISIBLE_DEVICES=0,1,3 python -m torch.distributed.run --nproc_per_node=3 --
 #     --seed 9 \
 #     --save_after 50\
 #     --device_ids 1\
-#     --dino_encoder /data/kmirakho/l3d_proj/Mov3r-L3D-project/pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
-#     --log_dir /data/kmirakho/l3d_proj/Mov3r-L3D-project/logs/ \
-#     --model_dir /data/kmirakho/l3d_proj/Mov3r-L3D-project/models/ \
-#     --eval_model /data/kmirakho/l3d_proj/Mov3r-L3D-project/models/model_20.pth \
+#     --dino_encoder ./pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
+#     --log_dir ./logs/ \
+#     --model_dir ./models/ \
+#     --eval_model ./models/model_20.pth \
 #     --dataset_path /data/kmirakho/l3d_proj/scannetv2 \
 #     # --run_eval \
 #     # --load_model \

@@ -23,20 +23,24 @@ def ConfAlignPointMapRegLoss(gt_batch, prediction, intrinsics, alpha=0.01, eps=1
     prediction_pm = prediction[0]
     prediction_pm_c = prediction[1]
 
+    mask_pred_pm = torch.isfinite(prediction_pm) #Prediction contains NaN or Inf values
+    mask_pred_pm_c = torch.isfinite(prediction_pm_c) #Prediction contains NaN or Inf values
+
     assert prediction_pm.shape[-1] == 3
-    assert gt_batch.shape[-1] == 1
+    # assert gt_batch.shape[-1] == 1
     assert intrinsics.shape[-1] == 4
     assert intrinsics.shape[-2] == 4
 
     B, K, H, W, _ = prediction_pm.shape
 
     # Convert Prediction depth to point Map without scaling 
-    Z = prediction_pm[:,:,:,:, 2]
+    # Z = prediction_pm[:,:,:,:, 2]
+    Z = gt_batch[:,:,:,:, 0]  # Use ground truth depth for point map calculation
 
-    u = torch.arange(W, device=prediction_pm.device).view(1, 1, 1, W).expand(B, K, H, W)
-    v = torch.arange(H, device=prediction_pm.device).view(1, 1, H, 1).expand(B, K, H, W)
+    u = torch.arange(W, device=prediction_pm.device).view(1, 1, 1, W).expand(B, K, H, W).contiguous()
+    v = torch.arange(H, device=prediction_pm.device).view(1, 1, H, 1).expand(B, K, H, W).contiguous()
 
-    intrinsics = intrinsics.view(B, K, 4, 4)  # Reshape to [B, K, 4, 4]
+    intrinsics = intrinsics.view(B, K, 4, 4).contiguous()  # Reshape to [B, K, 4, 4]
     fx = intrinsics[:, :, 0, 0].unsqueeze(-1).unsqueeze(-1)  # (B, K, 1, 1)
     fy = intrinsics[:, :, 1, 1].unsqueeze(-1).unsqueeze(-1)
     cx = intrinsics[:, :, 0, 2].unsqueeze(-1).unsqueeze(-1)
@@ -52,21 +56,25 @@ def ConfAlignPointMapRegLoss(gt_batch, prediction, intrinsics, alpha=0.01, eps=1
     X = (u - cx) * Z / fx
     Y = (v - cy) * Z / fy
 
-    point_map = torch.stack([X, Y, Z], dim=-1)  # (B, K, H, W, 3)
+    gt_point_map = torch.stack([X, Y, Z], dim=-1)  # (B, K, H, W, 3)
+    mask_gt = torch.isfinite(gt_point_map)  # Mask for ground truth point map
     
     x_hat = prediction_pm     # Predicted 3D pointmap
-    c = prediction_pm_c           # Confidence, keep dimensions [B, K, H, W, 1]
-
-    gt = point_map                      # Ground truth 3D pointmap
+    c = mask_pred_pm_c*prediction_pm_c # Confidence, keep dimensions [B, K, H, W, 1]
+    c = torch.clamp(c, min=eps)  # Avoid log(0)
 
     # Assuming scale is 1, alignment term becomes simple L2 diff weighted by confidence
-    diff = x_hat - gt                  # [B, K, H, W, 3]
-    loss_data = c * (diff ** 2)       # Confidence-weighted squared error
+    diff = (x_hat - gt_point_map)* mask_pred_pm * mask_gt   # Apply masks to the loss
+    loss_data = c * (diff ** 2)  # Confidence-weighted squared error
+    loss_data = loss_data  
 
     # Confidence regularization: -α log(c)
-    conf_reg = -alpha * torch.log(c + eps)
+    conf_reg = -alpha * torch.log(c)
 
     total_loss = loss_data + conf_reg # [B, K, H, W, 3]
+
+    #assert loss is not NaN
+    assert torch.all(torch.isfinite(total_loss)) #Loss contains NaN or Inf values"
     return total_loss.mean()
 
 def ConfAlignDepthRegLoss(gt_batch, prediction, alpha=0.01, eps=1e-6):
@@ -86,21 +94,36 @@ def ConfAlignDepthRegLoss(gt_batch, prediction, alpha=0.01, eps=1e-6):
     """
     prediction_d = prediction[0]
     prediction_d_c = prediction[1]
+    prediction_d_c = torch.clamp(prediction_d_c, min=0.01)  # avoid log(0)
+    
     x_hat = prediction_d       # Predicted Depth
     c = prediction_d_c  # Confidence, keep dimensions [B, K, H, W, 1]
+    mask_x_hat = torch.isfinite(x_hat)  # Mask for predicted depth
+    mask_x_hat_c = torch.isfinite(prediction_d_c)  # Mask for predicted confidence
+
+    c = mask_x_hat_c * prediction_d_c  # Apply mask to confidence
+    c = torch.clamp(c, min=eps)  # Avoid log(0)
 
     gt = gt_batch                      # Ground truth Depth
+    mask_gt = torch.isfinite(gt)       # Mask for ground truth depth
 
     # Assuming scale is 1, alignment term becomes simple L2 diff weighted by confidence
-    diff = x_hat - gt                  # [B, K, H, W, 1]
+    diff = (x_hat - gt)*mask_x_hat*mask_gt                  # [B, K, H, W, 1]
     loss_data = c * (diff ** 2)       # Confidence-weighted squared error
 
     # Confidence regularization: -α log(c)
-    conf_reg = -alpha * torch.log(c + eps)
+    conf_reg = -alpha * torch.log(c)
 
     total_loss = loss_data + conf_reg # [B, K, H, W, 1]
+    assert torch.all(torch.isfinite(total_loss)) #Loss contains NaN or Inf values
     return total_loss.mean()
 
+def ConfAlignPoseLoss(gt_quat, predict_quat, gt_trans, predict_trans):
+        # [B, K, H, W, 1]
+        # assert -> Any assert for shape check here?
+        loss = torch.norm(gt_quat - predict_quat)
+        loss += torch.norm(gt_trans - predict_trans)
+        return torch.sum(loss, dim=1).mean() 
 
 def test_losses():
     B, K, H, W = 2, 3, 64, 64

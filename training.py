@@ -15,8 +15,9 @@ from dino.dino_embedder import DINOEmbedder
 from cross_attention import PatchWiseCrossAttentionDecoder, DUSt3RAsymmetricCrossAttention
 from heads.dpthead import DPTHead
 from depth import DepthEmbedder
-from scannet_dataset_v4 import ScanNetPreprocessor, ScanNetMemoryDataset
+from scannet_dataset_v5 import BufferedSceneDataset, ScanNetPreprocessor, ScanNetMemoryDataset
 from losses.losses import ConfAlignPointMapRegLoss, ConfAlignDepthRegLoss
+import gc
 
 def get_config():
     parser = argparse.ArgumentParser(description='RL')
@@ -24,12 +25,21 @@ def get_config():
     parser.add_argument('--num_epochs', type=int, default=1000)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--context_length', type=int, default=32)
+    parser.add_argument('--max_scenes', type=int, default=10)
+    parser.add_argument('--frame_skip', type=int, default=10)
     parser.add_argument('--patch_size', type=int, default=16)
+
     parser.add_argument('--embed_dim', type=int, default=512)
     parser.add_argument('--encoder_dim', type=int, default=512)
     parser.add_argument('--decoder_dim', type=int, default=512)
     parser.add_argument('--num_heads', type=int, default=8)
-    parser.add_argument('--num_workers', type=int, default=4)
+    parser.add_argument('--load_after', type=int, default=5)
+    parser.add_argument('--save_after', type=int, default=50)
+    
+    parser.add_argument('--prefetch_factor', type=int, default=8)
+    parser.add_argument('--dl_num_workers', type=int, default=4)
+    parser.add_argument('--ds_num_workers', type=int, default=8)
+    
     parser.add_argument('--ca_depth', type=int, default=4)
     parser.add_argument('--pos_embed', type=str, default='cosine', help='Position embedding type: cosine or RoPE')
     parser.add_argument('--pc_dec_depth', type=int, default=8)
@@ -47,8 +57,6 @@ def get_config():
     parser.add_argument('--seed', type=int, default=42)
     args = parser.parse_args()
     return args
-
-
 
 class Mov3r:
     def __init__(self, args, dist, local_rank):
@@ -81,6 +89,11 @@ class Mov3r:
         #  Depth Image Self attention Module Takes depth image and projects to point map and then takes to 
         # Initialize ViT model for self attention
         self.depth_embedder = DepthEmbedder(patch_embed_cls='PatchEmbedDust3R', img_size=224, patch_size=16, dec_embed_dim=768, pos_embed=args.pos_embed, pc_dec_depth=self.pc_dec_depth)
+        depth_state_dict = torch.load('pretrained_weights/align3r_depthanything.pth', map_location=self.device)
+
+        filtered_state_dict = {k: v for k, v in depth_state_dict['model'].items() if k.startswith('dec_blocks_pc')}
+        self.depth_embedder.dec_blocks_pc.load_state_dict({k.replace('dec_blocks_pc.', ''): v for k, v in filtered_state_dict.items() if k.startswith('dec_blocks_pc.')}, strict=False)
+        del depth_state_dict, filtered_state_dict
 
         self.dino_patch_embed = DINOEmbedder(patch_embed='dinov2_vitb14_reg', img_size=224, patch_size=16)
         # self.dino_patch_embed.load_state_dict(torch.load(args.dino_encoder, map_location=self.device))
@@ -90,6 +103,8 @@ class Mov3r:
         for k, _ in self.dino_patch_embed.state_dict().items():
             new_key = k.replace('patch_embed.', '', 1)
             self.dino_patch_embed.state_dict()[k] = dino_model_state_dict[new_key]
+
+        del dino_model_state_dict
 
         # Initialize the CrossAttention model
         self.dust3r_cross = DUSt3RAsymmetricCrossAttention(
@@ -143,6 +158,9 @@ class Mov3r:
         #avg loss
         self.avg_loss = 0
 
+        torch.cuda.empty_cache()
+        gc.collect()
+
     def create_distributed_loader(self, dataset):
         sampler = DistributedSampler(
             dataset,
@@ -155,8 +173,9 @@ class Mov3r:
             dataset,
             batch_size=self.batch_size,
             sampler=sampler,
-            num_workers=args.num_workers,
+            num_workers=args.dl_num_workers,
             pin_memory=True,
+            prefetch_factor=args.prefetch_factor,
             persistent_workers=True
         )
         return data_loader, sampler
@@ -167,7 +186,7 @@ class Mov3r:
         # features (B, S, patch_tokens, dim_in)
         # instrinsic shape [B,S,4,4]
         
-        depth = depth.permute(0, 1, 3, 4, 2)
+        depth = depth.permute(0, 1, 3, 4, 2).contiguous()
         assert depth.shape[-1] == 1
         assert intrinsic_depth.shape[-1] == 4
         assert intrinsic_depth.shape[-2] == 4
@@ -202,8 +221,10 @@ class Mov3r:
         #set the depth head to train
         self.depth_head.train()
         
-        for epoch in range(self.num_epochs):
-            
+        for epoch in range(self.num_epochs):        
+            if epoch > 0 and epoch % args.load_after == 0:
+                train_dataset = buffer_scene.fetch_dataset()
+                self.train_loader, self.train_sampler = self.create_distributed_loader(train_dataset)
             self.train_sampler.set_epoch(epoch)
 
             #epoch bar for training each epoch
@@ -217,74 +238,88 @@ class Mov3r:
             start_time = time.time()
 
             for batch_idx, batch in enumerate(epoch_bar):
-                rgb, depth, _, intrinsic = (batch["rgb"].to(self.device, non_blocking=True), batch["depth"].to(self.device, non_blocking=True), batch["pose"].to(self.device, non_blocking=True), batch
-                ["intrinsics"])
+                rgb, depth, pred_depth, _, intrinsic = (batch["rgb"].to(self.device, non_blocking=True), batch["depth"].to(self.device, non_blocking=True),
+                                                         batch["pred_depth"].to(self.device, non_blocking=True), batch["pose"].to(self.device, non_blocking=True), batch["intrinsics"])
                 B, S, C, H, W = rgb.shape
-                rgb = rgb.view(-1, H, W, C)
+                rgb = rgb.view(-1, H, W, C).contiguous()
 
                 _, _, H, W = depth.shape
-                depth = depth.view(-1, H, W, 1)
+                depth = depth.view(-1, H, W, 1).contiguous()
+
+                pred_depth = pred_depth.view(-1, H, W, 1).contiguous()
+
                 intrinsic_depth = intrinsic['intrinsic_depth'].to(self.device, non_blocking=True)
                 intrinsic_depth = intrinsic_depth.repeat_interleave(repeats=S, dim=0)
 
                 assert rgb.shape[-1] == 3
                 assert depth.shape[-1] == 1
+                assert pred_depth.shape[-1] == 1
+
+                # Check for NaN/Inf in inputs
+                assert not torch.isnan(rgb).any(), "NaN in RGB inputs"
+                assert torch.isfinite(depth).all(), "Non-finite depth values"
+
+                try:
+                    pc_embedding = self.depth_embedder(pred_depth, intrinsic_depth)
+
+                    rgb = rgb.permute(0, 3, 1, 2).contiguous()
+                    with torch.no_grad():
+                        patch_embedding = self.dino_patch_embed(rgb)
+                    
+                    features = self.dust3r_cross(patch_embedding, pc_embedding)
+                    features = features.view(B*S, 1, features.shape[-2], features.shape[-1]).contiguous()
+                    rgb = rgb.view(B*S, 1, C, H, W).contiguous()
+                    depth = depth.view(B, S, 1, H, W).contiguous()
+
+                    predict_depth, predict_pointmap = self.dpt_head(features,rgb)
+                    predict_depth = list(predict_depth)
+                    predict_pointmap = list(predict_pointmap)
+                    predict_depth[0] = predict_depth[0].view(B, S, H, W, 1).contiguous()
+                    predict_depth[1] = predict_depth[1].view(B, S, H, W, 1).contiguous()
+
+                    predict_pointmap[0] = predict_pointmap[0].view(B, S, H, W, C).contiguous()
+                    predict_pointmap[1] = predict_pointmap[1].view(B, S, H, W, 1).contiguous()
+                    assert predict_depth[0].shape[-1] == 1
+                    assert predict_pointmap[0].shape[-1] == 3
+
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
+                    with torch.cuda.amp.autocast():
+                        #calculate loss
+                        loss = self.get_loss(predict_pointmap, predict_depth, depth , intrinsic_depth)
                 
-                pc_embedding = self.depth_embedder(depth, intrinsic_depth)
+                    # self.scaler.scale(loss)
+                    # self.scaler.step(self.optimizer)
+                    # self.scaler.update()
+                    loss.backward()
+                    self.optimizer.step()
+                    #sync losses across all GPUs
+                    loss_tensor = loss.detach().clone()
+                    dist.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+                    self.avg_loss = (loss_tensor.item() / dist.get_world_size() + self.avg_loss * batch_idx) / (batch_idx + 1)
 
-                rgb = rgb.permute(0, 3, 1, 2)
-                with torch.no_grad():
-                    patch_embedding = self.dino_patch_embed(rgb)
+                    if local_rank == 0:
+                        epoch_bar.set_postfix(
+                            avg_loss=f'{self.avg_loss:.5f}',
+                            batch_rate=f'{(batch_idx+1)/(time.time()-start_time):.2f}'
+                        )
+                    
+                    # global features
+                    # local features
+                    # key frame selection
+                    # pose prediction
+                except Exception as e:
+                    print(f"Error in batch {batch_idx}: {e}")
+                    print(f"Skipping batch {batch_idx} due to error.")
+
+                if epoch % args.save_after == 0 and local_rank == 0:
+                    self.save_model(epoch)
                 
-                features = self.dust3r_cross(patch_embedding, pc_embedding)
-                features = features.view(B*S, 1, features.shape[-2], features.shape[-1])
-                rgb = rgb.view(B*S, 1, C, H, W)
-                depth = depth.view(B, S, 1, H, W)
-
-                predict_depth, predict_pointmap = self.dpt_head(features,rgb)
-                predict_depth = list(predict_depth)
-                predict_pointmap = list(predict_pointmap)
-                predict_depth[0] = predict_depth[0].view(B, S, H, W, 1)
-                predict_depth[1] = predict_depth[1].view(B, S, H, W, 1)
-
-                predict_pointmap[0] = predict_pointmap[0].view(B, S, H, W, C)
-                predict_pointmap[1] = predict_pointmap[1].view(B, S, H, W, 1)
-                assert predict_depth[0].shape[-1] == 1
-                assert predict_pointmap[0].shape[-1] == 3
-
-                self.optimizer.zero_grad(set_to_none=True)
+                if self.writer is not None and local_rank == 0:
+                    self.log_data(epoch)
                 
-                with torch.cuda.amp.autocast():
-                    #calculate loss
-                    loss = self.get_loss(predict_pointmap, predict_depth, depth , intrinsic_depth)
+                self.scheduler.step()
             
-                # self.scaler.scale(loss)
-                # self.scaler.step(self.optimizer)
-                # self.scaler.update()
-                loss.backward()
-                self.optimizer.step()
-
-                #sync losses across all GPUs
-                loss_tensor = loss.detach().clone()
-                dist.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
-                self.avg_loss = (loss_tensor.item() / dist.get_world_size() + self.avg_loss * batch_idx) / (batch_idx + 1)
-
-                if local_rank == 0:
-                    epoch_bar.set_postfix(
-                        avg_loss=f'{self.avg_loss:.5f}',
-                        batch_rate=f'{(batch_idx+1)/(time.time()-start_time):.2f}'
-                    )
-                
-                # global features
-                # local features
-                # key frame selection
-                # pose prediction
-        if epoch % 10 == 0 and local_rank == 0:
-            self.save_model(epoch)
-
-        if self.writer is not None and local_rank == 0:
-            self.log_data(epoch)
-
     
     def log_data(self, epoch):
         self.writer.add_scalar('Avg_loss', self.avg_loss, epoch)
@@ -337,8 +372,6 @@ class Mov3r:
             torch.save(self.depth_head.state_dict(), model_path)
 
 
-
-
 if __name__ == "__main__":
     args = get_config()
     # Set the random seed for reproducibility
@@ -365,7 +398,7 @@ if __name__ == "__main__":
         init_method='env://',
         world_size=world_size,
         rank=local_rank,
-        timeout=datetime.timedelta(seconds=30)
+        timeout=datetime.timedelta(seconds=10000)
         )
     
 
@@ -377,28 +410,16 @@ if __name__ == "__main__":
     ])
 
     # Step 1: Preprocess and load dataset to memory
-    preprocessor = ScanNetPreprocessor(
-        root_dir=args.dataset_path,
-        output_h5_path='scannet_preprocessed.h5',
-        max_scenes=1,  # Limit to 100 scenes for memory efficiency
-        num_workers=8,   # Adjust based on your system
-        rgb_only=False,  # Set to True to only load RGB images
-        compression="lzf" # Fast compression
-    )
-    
-    # Option 2: Load directly to memory
-    memory_dataset = preprocessor.load_dataset(save_to_disk=False, return_data=True)
-
-    # From memory (fastest, but requires most RAM)
-    dataset = ScanNetMemoryDataset(
-        dataset_source=memory_dataset,
+    buffer_scene = BufferedSceneDataset(
+        root_dir='/data/kmirakho/l3d_proj/scannetv2',
+        max_scenes=args.max_scenes,
+        num_workers=args.max_scenes,
         num_frames=args.context_length,
-        transforms=data_transforms,
-        frame_skip=1,
-        rgb_only=False
+        frame_skip=args.frame_skip,
+        data_transforms=data_transforms
     )
 
-
+    dataset = buffer_scene.fetch_dataset()
     mov3r = Mov3r(args, dist, local_rank)
     mov3r.train()
     # Initialize the PointMap & Depth Predictor model

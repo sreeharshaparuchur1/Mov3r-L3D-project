@@ -6,8 +6,8 @@
 #
 #!/bin/bash
 
-CUDA_VISIBLE_DEVICES=0,1,3 python -m torch.distributed.run --nproc_per_node=3 --master_port=29513 training_karan.py \
-    --run_name train_embed_v4 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 --master_port=29513 training_karan.py \
+    --run_name train_embed_v6 \
     --max_scenes 10\
     --num_epochs 1000 \
     --batch_size 4 \
@@ -28,7 +28,7 @@ CUDA_VISIBLE_DEVICES=0,1,3 python -m torch.distributed.run --nproc_per_node=3 --
     --clip_grad_norm 5.0 \
     --clip_grad_val 10.0 \
     --lr 1e-4 \
-    --gamma 0.999\
+    --gamma 0.995\
     --weight_decay 1e-5\
     --pc_dec_depth 8 \
     --seed 9 \

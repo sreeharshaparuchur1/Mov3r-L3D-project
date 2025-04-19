@@ -12,7 +12,7 @@ import torch.nn.functional as F
 from tqdm import tqdm
 
 class SimplerPoseHead(nn.Module):
-    def __init__(self, B: int, S: int, Num_patches: int, emb_dim: int, alpha: float = 0.5):
+    def __init__(self, B: int, S: int, num_patches: int, emb_dim: int, alpha: float = 0.5):
         """
         Args:
             B: Batch size
@@ -25,8 +25,10 @@ class SimplerPoseHead(nn.Module):
         self.S = S
         self.alpha = alpha
         self.pose_mlp = nn.Sequential(
-            nn.LayerNorm(Num_patches*emb_dim),
-            nn.Linear(Num_patches*emb_dim, 128),
+            nn.LayerNorm(num_patches*emb_dim),
+            nn.Linear(num_patches*emb_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 128),
             nn.ReLU(),
             nn.Linear(128, 6)  # 3 for rotation (axis-angle), 3 for translation
         )
@@ -255,7 +257,7 @@ if __name__ == "__main__":
     # fused_tokens = model.toransform_pose_tokens()
 
     pose_head = SimplerPoseHead(B, S, P, D)
-    import pdb; pdb.set_trace()
+    
     local_pose = pose_head.forward(model.local_memory)
     global_pose = pose_head.forward(model.global_memory)
 

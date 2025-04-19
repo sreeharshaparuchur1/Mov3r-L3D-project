@@ -208,7 +208,7 @@ class DinoVisionTransformer(nn.Module):
             **kwargs,
         )
         assert (w0, h0) == patch_pos_embed.shape[-2:]
-        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim)
+        patch_pos_embed = patch_pos_embed.permute(0, 2, 3, 1).view(1, -1, dim).contiguous()
         return torch.cat((class_pos_embed.unsqueeze(0), patch_pos_embed), dim=1).to(previous_dtype)
 
     def prepare_tokens_with_masks(self, x, masks=None):

@@ -32,7 +32,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 
     --weight_decay 1e-5\
     --pc_dec_depth 8 \
     --seed 9 \
-    --save_after 50\
+    --save_after 10\
     --depth_embedder ./pretrained_weights/align3r_depthanything.pth \
     --dino_encoder ./pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
     --log_dir ./logs/ \

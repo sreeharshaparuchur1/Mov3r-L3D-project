@@ -74,7 +74,7 @@ class PatchEmbed(nn.Module):
 
         x = self.proj(x)  # B C H W
         H, W = x.size(2), x.size(3)
-        x = x.flatten(2).transpose(1, 2)  # B HW C
+        x = x.flatten(2).transpose(1, 2).contiguous()  # B HW C
         x = self.norm(x)
         if not self.flatten_embedding:
             x = x.reshape(-1, H, W, self.embed_dim)  # B H W C

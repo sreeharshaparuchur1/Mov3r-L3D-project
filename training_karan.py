@@ -84,8 +84,8 @@ class UnifiedModel(torch.nn.Module):
             dropout=args.dropout
         )
 
-        self.point_head = DPTHead(dim_in=args.embed_dim, patch_size=args.patch_size, output_dim=4, activation="inv_log", conf_activation="expp1")
-        self.depth_head = DPTHead(dim_in=args.embed_dim, patch_size=args.patch_size, output_dim=2, activation="exp", conf_activation="expp1")
+        self.point_head = DPTHead(dim_in=args.embed_dim, patch_size=args.patch_size, output_dim=4, activation="inv_log", conf_activation="sigmoid")
+        self.depth_head = DPTHead(dim_in=args.embed_dim, patch_size=args.patch_size, output_dim=2, activation="exp", conf_activation="sigmoid")
     
     def encoder(self, rgb, pred_depth, intrinsic_depth):
         pc_embedding = self.depth_embedder(pred_depth, intrinsic_depth)
@@ -178,7 +178,7 @@ class Mov3r:
         self.buffer_scene = BufferedSceneDataset(
             root_dir=args.dataset_path,
             max_scenes=args.max_scenes,
-            num_workers=args.max_scenes,
+            num_workers=args.ds_num_workers,
             num_frames=args.context_length,
             frame_skip=args.frame_skip,
             data_transforms=data_transforms

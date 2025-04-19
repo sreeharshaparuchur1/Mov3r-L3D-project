@@ -13,8 +13,11 @@ import h5py
 from functools import lru_cache
 from torchvision import transforms
 from concurrent.futures import ThreadPoolExecutor
+import threading
 import time
 import dust3r.datasets.utils.cropping as cropping
+import random
+from collections import deque
 
 class ScanNetPreprocessor:
     """Optimized preprocessor to load entire ScanNet dataset into memory"""
@@ -394,7 +397,7 @@ class ScanNetMemoryDataset(Dataset):
         return sample
 
 class BufferedSceneDataset(Dataset):
-    def __init__(self, root_dir, max_scenes=50, num_workers=8, prefetch_scenes=2):
+    def __init__(self, root_dir, max_scenes=50, num_workers=8, prefetch_scenes=2, num_frames=32, frame_skip=1, data_transforms=None):
         """
         Args:
             root_dir: Path to dataset directory
@@ -406,7 +409,10 @@ class BufferedSceneDataset(Dataset):
         self.max_scenes = max_scenes
         self.num_workers = num_workers
         self.prefetch_scenes = prefetch_scenes
-        
+        self.data_transforms = data_transforms
+        self.num_frames=num_frames
+        self.frame_skip=frame_skip
+
         # Scene management
         self.all_scene_dirs = sorted(glob(os.path.join(root_dir, '*')))
         self.total_scenes = len(self.all_scene_dirs)
@@ -437,55 +443,135 @@ class BufferedSceneDataset(Dataset):
                                min(self.current_idx + self.max_scenes, self.total_scenes))
             
             new_data = self._load_scene_batch(next_indices)
+            dataset = ScanNetMemoryDataset(
+                dataset_source=new_data,
+                num_frames=self.num_frames,
+                transforms=self.data_transforms,
+                frame_skip=self.frame_skip,
+                rgb_only=False
+            )
             
             with self.buffer_lock:
                 if not self.active_buffer:
-                    self.active_buffer = new_data
+                    self.active_buffer = dataset
                 else:
-                    self.prefetch_buffer = new_data
+                    self.prefetch_buffer = dataset
 
         threading.Thread(target=prefetch_task, daemon=True).start()
-
+    
+    def _swap_buffers(self):
+        """Swap prefetch buffer to active and start prefetching next batch"""
+        with self.buffer_lock:
+            # If no prefetch buffer is available, wait until one is ready
+            if not self.prefetch_buffer:
+                print("Waiting for prefetch buffer to be ready...")
+                self.buffer_lock.release()
+                # Simple polling with sleep to avoid busy waiting
+                while True:
+                    time.sleep(0.1)
+                    with self.buffer_lock:
+                        if self.prefetch_buffer:
+                            break
+                        self.buffer_lock.release()
+                self.buffer_lock.acquire()
+            
+            # Swap buffers
+            self.active_buffer = self.prefetch_buffer
+            self.prefetch_buffer = []
+        
+        # Update current index and start prefetching next batch
+        self.current_idx = min(self.current_idx + self.max_scenes, self.total_scenes)
+        
+        # Only prefetch if there are more scenes to load
+        if self.current_idx < self.total_scenes:
+            self._fill_buffers()
+    
     def __len__(self):
-        return self.total_scenes * 50  # Assuming 50 frames per scene
-
+        """Return the total number of samples across all scenes"""
+        # Wait until active buffer is available
+        while not self.active_buffer:
+            time.sleep(0.1)
+        
+        # Use the length of active buffer for current batch
+        total_len = len(self.active_buffer)
+        
+        # Account for wrapped-around scenes if at the end
+        if self.current_idx + self.max_scenes >= self.total_scenes:
+            # At final batch
+            return total_len
+        
+        # Return length of current active buffer
+        return total_len
+    
     def __getitem__(self, idx):
-        # Calculate scene and frame indices
-        scene_idx = idx // 50
-        frame_idx = idx % 50
+        """Get a sample from the active buffer, swapping if necessary"""
+        # Wait for initial buffer to be ready
+        while not self.active_buffer:
+            time.sleep(0.1)
         
-        # Check if we need to switch buffers
-        if scene_idx >= self.current_idx + self.max_scenes:
-            with self.buffer_lock:
-                self.active_buffer = self.prefetch_buffer
-                self.prefetch_buffer = []
-                self.current_idx += self.max_scenes
+        # Check if we've exhausted the current buffer
+        if idx >= len(self.active_buffer):
+            # If we're at the end of the dataset, wrap around
+            if self.current_idx + self.max_scenes >= self.total_scenes:
+                self.current_idx = 0
+                #randomly shuffle the  scene dirs
+                random.shuffle(self.all_scene_dirs)
                 self._fill_buffers()
+                while not self.active_buffer:
+                    time.sleep(0.1)
+            else:
+                # Otherwise swap to the next buffer
+                self._swap_buffers()
+            
+            # Adjust index for the new buffer
+            idx = idx % len(self.active_buffer)
         
-        # Get data from active buffer
-        scene_id = list(self.active_buffer.keys())[scene_idx - self.current_idx]
-        scene_data = self.active_buffer[scene_id]
-        
-        return {
-            'rgb': scene_data['rgb'][frame_idx],
-            'depth': scene_data['depth'][frame_idx],
-            'pose': scene_data['pose'][frame_idx],
-            'intrinsics': scene_data['intrinsics']
-        }
+        # Get the item from the active buffer
+        return self.active_buffer
 
-# Usage
-dataset = BufferedSceneDataset(
-    root_dir='/path/to/scannet',
-    max_scenes=50,
-    num_workers=8,
-    prefetch_scenes=2
-)
 
-dataloader = DataLoader(
-    dataset,
-    batch_size=32,
-    num_workers=4,
-    pref
+class BufferedSceneDataset(Dataset):
+    def __init__(self, root_dir, max_scenes=50, num_workers=8, 
+                 prefetch_scenes=2, num_frames=32, frame_skip=1, 
+                 data_transforms=None):
+        self.root_dir = root_dir
+        self.max_scenes = max_scenes
+        self.num_workers = num_workers
+        self.prefetch_scenes = prefetch_scenes
+        self.data_transforms = data_transforms
+        self.num_frames=num_frames
+        self.frame_skip=frame_skip
+
+        # Scene management
+        self.all_scene_dirs = sorted(glob(os.path.join(root_dir, '*')))
+        self.total_scenes = len(self.all_scene_dirs)
+        self.current_idx = 0
+    
+    def _load_scene_batch(self, scene_indices):
+        """Load batch of scenes into memory"""
+        preprocessor = ScanNetPreprocessor(
+            root_dir=self.root_dir,
+            max_scenes=len(scene_indices),
+            num_workers=self.num_workers,
+            rgb_only=False
+        )
+        return preprocessor.load_dataset(save_to_disk=False, return_data=True)
+    
+    def fetch_dataset(self):
+        # Load scenes and create dataset
+        next_indices = range(self.current_idx, min(self.current_idx + self.max_scenes, self.total_scenes))
+        new_data = self._load_scene_batch(next_indices)
+        dataset = ScanNetMemoryDataset(
+            dataset_source=new_data,
+            num_frames=self.num_frames,
+            transforms=self.data_transforms,
+            frame_skip=self.frame_skip,
+            rgb_only=False
+            )                
+        self.current_idx = (self.current_idx + len(next_indices))%self.total_scenes
+    
+        return dataset
+
 
 # Example usage
 def main():
@@ -494,22 +580,50 @@ def main():
         # transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
     ])
-    
-    # Step 1: Preprocess and load dataset to memory
-    preprocessor = ScanNetPreprocessor(
+    # Usage
+    buffer_scene = BufferedSceneDataset(
         root_dir='/data/kmirakho/l3d_proj/scannetv2',
-        output_h5_path='scannet_preprocessed.h5',
-        max_scenes=10,  # Limit to 100 scenes for memory efficiency
-        num_workers=8,   # Adjust based on your system
-        rgb_only=False,  # Set to True to only load RGB images
-        compression="lzf" # Fast compression
+        max_scenes=2,
+        num_workers=8,
+        prefetch_scenes=2,
+        num_frames=32,
+        frame_skip=1,
+        data_transforms=data_transforms
     )
+
+    for epoch in range(10):
+        dataset = buffer_scene.fetch_dataset()
+        
+        # Step 3: Create optimized DataLoader
+        dataloader = DataLoader(
+            dataset,
+            batch_size=4,
+            shuffle=True,
+            num_workers=4,  # For dataset in memory, fewer workers needed
+            pin_memory=True,
+            prefetch_factor=8,
+            persistent_workers=True
+        )
+        epoch_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}')
+        for batch_idx, batch in enumerate(epoch_bar):
+            time.sleep(0.1)
+            pass
+
+    # Step 1: Preprocess and load dataset to memory
+    # preprocessor = ScanNetPreprocessor(
+    #     root_dir='/data/kmirakho/l3d_proj/scannetv2',
+    #     output_h5_path='scannet_preprocessed.h5',
+    #     max_scenes=10,  # Limit to 100 scenes for memory efficiency
+    #     num_workers=8,   # Adjust based on your system
+    #     rgb_only=False,  # Set to True to only load RGB images
+    #     compression="lzf" # Fast compression
+    # )
     
     # Option 1: Save to disk for future use
     # h5_path = preprocessor.load_dataset(save_to_disk=False, return_data=False)
     
     # Option 2: Load directly to memory
-    memory_dataset = preprocessor.load_dataset(save_to_disk=False, return_data=True)
+    # memory_dataset = preprocessor.load_dataset(save_to_disk=False, return_data=True)
     
     # Step 2: Create memory dataset
     # From disk (more memory efficient)
@@ -523,34 +637,34 @@ def main():
     # )
     
     # From memory (fastest, but requires most RAM)
-    dataset = ScanNetMemoryDataset(
-        dataset_source=memory_dataset,
-        num_frames=32,
-        transforms=data_transforms,
-        frame_skip=1,
-        rgb_only=False
-    )
+    # dataset = ScanNetMemoryDataset(
+    #     dataset_source=memory_dataset,
+    #     num_frames=32,
+    #     transforms=data_transforms,
+    #     frame_skip=1,
+    #     rgb_only=False
+    # )
     
-    # Step 3: Create optimized DataLoader
-    dataloader = DataLoader(
-        dataset,
-        batch_size=8,
-        shuffle=True,
-        num_workers=4,  # For dataset in memory, fewer workers needed
-        pin_memory=True,
-        prefetch_factor=8,
-        persistent_workers=True
-    )
+    # # Step 3: Create optimized DataLoader
+    # dataloader = DataLoader(
+    #     dataset,
+    #     batch_size=8,
+    #     shuffle=True,
+    #     num_workers=4,  # For dataset in memory, fewer workers needed
+    #     pin_memory=True,
+    #     prefetch_factor=8,
+    #     persistent_workers=True
+    # )
     
-    # Example training loop
-    for epoch in range(10):
-        epoch_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}')
-        for batch_idx, batch in enumerate(epoch_bar):
-            # Process batch here
-            # import pdb
-            # pdb.set_trace()
-            time.sleep(0.1)
-            pass
+    # # Example training loop
+    # for epoch in range(10):
+    #     epoch_bar = tqdm(dataloader, desc=f'Epoch {epoch+1}')
+    #     for batch_idx, batch in enumerate(epoch_bar):
+    #         # Process batch here
+    #         # import pdb
+    #         # pdb.set_trace()
+    #         time.sleep(0.1)
+    #         pass
 
 
 if __name__ == "__main__":

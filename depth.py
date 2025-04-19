@@ -88,15 +88,15 @@ class DepthEmbedder(torch.nn.Module):
         B, H, W, _ = depth_map.shape
         device = depth_map.device
         # Create pixel coordinate grid
-        u = torch.arange(W, device=device).view(1, 1, W).expand(B, H, W)
-        v = torch.arange(H, device=device).view(1, H, 1).expand(B, H, W)
+        u = torch.arange(W, device=device).view(1, 1, W).expand(B, H, W).contiguous()
+        v = torch.arange(H, device=device).view(1, H, 1).expand(B, H, W).contiguous()
 
         # Compute principal point (center of image)
         cx = W / 2.0
         cy = H / 2.0
 
         # Reshape focal_length to broadcast with image grid
-        f = focal_length_px.view(B, 1, 1)
+        f = focal_length_px.view(B, 1, 1).contiguous()
 
         # Convert to camera coordinates
         Z = depth_map.squeeze(-1) 
@@ -168,6 +168,12 @@ if __name__ == "__main__":
         
         depth_embedder = DepthEmbedder(patch_embed_cls='PatchEmbedDust3R', img_size=224, patch_size=16, dec_embed_dim=768, pos_embed='cosine', pc_dec_depth=8)
         depth_embedder = depth_embedder.cuda()
+
+        depth_state_dict = torch.load('pretrained_weights/align3r_depthanything.pth', map_location='cuda')
+
+        filtered_state_dict = {k: v for k, v in depth_state_dict['model'].items() if k.startswith('dec_blocks_pc')}
+        depth_embedder.dec_blocks_pc.load_state_dict({k.replace('dec_blocks_pc.', ''): v for k, v in filtered_state_dict.items() if k.startswith('dec_blocks_pc.')}, strict=False)
+
         
         depth_embedding = depth_embedder(depth, flen)
         print(depth_embedding.shape)

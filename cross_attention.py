@@ -28,13 +28,13 @@ class RoPE2D(nn.Module):
         freqs = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
         t = torch.arange(self.max_seq_len).type_as(freqs)
         freqs = torch.outer(t, freqs)
-        return torch.cos(freqs).view(self.max_seq_len, 1, self.dim // 2).repeat(1, 1, 2)
+        return torch.cos(freqs).view(self.max_seq_len, 1, self.dim // 2).repeat(1, 1, 2).contiguous()
     
     def _compute_sin_cached(self):
         freqs = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
         t = torch.arange(self.max_seq_len).type_as(freqs)
         freqs = torch.outer(t, freqs)
-        return torch.sin(freqs).view(self.max_seq_len, 1, self.dim // 2).repeat(1, 1, 2)
+        return torch.sin(freqs).view(self.max_seq_len, 1, self.dim // 2).repeat(1, 1, 2).contiguous()
     
     def forward(self, x, seq_idx):
         # x: [batch_size, seq_len, dim]
@@ -48,7 +48,7 @@ class RoPE2D(nn.Module):
         sin = self.sin_cached[seq_idx].transpose(1,0)  # [seq_len, 1, dim]
         
         # Split embedding into half for rotation
-        x_half = x.view(batch_size, seq_len, -1, 2)
+        x_half = x.view(batch_size, seq_len, -1, 2).contiguous()
         x_half_rot = torch.stack([-x_half[..., 1], x_half[..., 0]], dim=-1)
         x_rot = x_half_rot.reshape(batch_size, seq_len, -1)
         
@@ -276,4 +276,120 @@ class DUSt3RAsymmetricCrossAttention(nn.Module):
         for block1 in self.dec_blocks1:
             x1_new = block1(x1, x2)  # View 2 attends to View 1
             x1 = x1_new
+        return x1
+
+class CrossAttentionMasked(nn.Module):
+    def __init__(self, dim, num_heads=8, dropout=0.0, use_rope=True):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.to_q = nn.Linear(dim, dim, bias=False)
+        self.to_k = nn.Linear(dim, dim, bias=False)
+        self.to_v = nn.Linear(dim, dim, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.Dropout(dropout)
+        )
+
+        self.use_rope = use_rope
+        if use_rope:
+            self.rope = RoPE2D(dim // num_heads)
+
+    def forward(self, x, context, context_mask=None):
+        """
+        Args:
+            x: (B, Nq, D)
+            context: (B, Nk, D)
+            context_mask: (B, Nk), True for valid, False for pad
+        """
+        B, Nq, D = x.shape
+        _, Nk, _ = context.shape
+
+        q = self.to_q(x)
+        k = self.to_k(context)
+        v = self.to_v(context)
+
+        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads)
+        k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads)
+        v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads)
+
+        if self.use_rope:
+            pos_q = torch.arange(Nq, device=x.device)
+            pos_k = torch.arange(Nk, device=x.device)
+            q = rearrange(q, 'b h n d -> (b h) n d')
+            k = rearrange(k, 'b h n d -> (b h) n d')
+            q = self.rope(q, pos_q)
+            k = self.rope(k, pos_k)
+            q = rearrange(q, '(b h) n d -> b h n d', h=self.num_heads)
+            k = rearrange(k, '(b h) n d -> b h n d', h=self.num_heads)
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B, H, Nq, Nk)
+
+        #TODO: add causal mask
+        if context_mask is not None:
+            context_mask = context_mask.unsqueeze(1).unsqueeze(2)  # (B, 1, 1, Nk)
+            attn = attn.masked_fill(~context_mask, float('-inf'))
+
+        attn = F.softmax(attn, dim=-1)
+        out = torch.matmul(attn, v)  # (B, H, Nq, D)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)
+
+
+class CrossBlockMasked(nn.Module):
+    def __init__(self, dim, num_heads=8, mlp_ratio=4.0, dropout=0.0, use_rope=True):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(dim)
+        self.self_attn = nn.MultiheadAttention(dim, num_heads, dropout=dropout, batch_first=True)
+
+        self.norm2 = nn.LayerNorm(dim)
+        self.cross_attn = CrossAttentionMasked(dim, num_heads, dropout, use_rope)
+
+        self.norm3 = nn.LayerNorm(dim)
+        mlp_hidden_dim = int(dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(dim, mlp_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x, context, context_mask=None):
+        residual = x
+        x = self.norm1(x)
+        x_attn, _ = self.self_attn(x, x, x)
+        x = residual + x_attn
+
+        residual = x
+        x = self.norm2(x)
+        x = residual + self.cross_attn(x, context, context_mask)
+
+        residual = x
+        x = self.norm3(x)
+        x = residual + self.mlp(x)
+
+        return x
+
+
+class DUSt3RAsymmetricCrossAttention_masked(nn.Module):
+    def __init__(self, encoder_dim=1024, decoder_dim=768, depth=12, num_heads=12, dropout=0.0):
+        super().__init__()
+        self.decoder_embed = nn.Linear(encoder_dim, decoder_dim)
+        self.dec_blocks1 = nn.ModuleList([
+            CrossBlockMasked(decoder_dim, num_heads, 4.0, dropout)
+            for _ in range(depth)
+        ])
+
+    def forward(self, feat_depth, feat_rgb, mask_rgb=None):
+        x1 = self.decoder_embed(feat_depth)
+        x2 = self.decoder_embed(feat_rgb)
+
+        for block1 in self.dec_blocks1:
+            x1_new = block1(x1, x2, mask_rgb)
+            x1 = x1_new
+
         return x1

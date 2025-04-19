@@ -32,7 +32,7 @@ def get_config():
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--ca_depth', type=int, default=4)
     parser.add_argument('--pos_embed', type=str, default='cosine', help='Position embedding type: cosine or RoPE')
-    parser.add_argument('--pc_dec_depth', type=int, default=8)
+    parser.add_argument('--pc_dec_depth', type=int, default=12)
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--device_ids', nargs='+', type=int, default=[0, 1, 2], help='List of GPU device IDs')
@@ -80,6 +80,10 @@ class Mov3r:
         #  Depth Image Self attention Module Takes depth image and projects to point map and then takes to 
         # Initialize ViT model for self attention
         self.depth_embedder = DepthEmbedder(patch_embed_cls='PatchEmbedDust3R', img_size=224, patch_size=16, dec_embed_dim=768, pos_embed=args.pos_embed, pc_dec_depth=self.pc_dec_depth)
+        depth_state_dict = torch.load('pretrained_weights/align3r_depthanything.pth', map_location=self.device)
+
+        filtered_state_dict = {k: v for k, v in depth_state_dict['model'].items() if k.startswith('dec_blocks_pc')}
+        self.depth_embedder.dec_blocks_pc.load_state_dict({k.replace('dec_blocks_pc.', ''): v for k, v in filtered_state_dict.items() if k.startswith('dec_blocks_pc.')}, strict=False)
 
         import pdb
         pdb.set_trace()

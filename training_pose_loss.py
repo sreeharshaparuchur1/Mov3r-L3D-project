@@ -16,7 +16,7 @@ from cross_attention import PatchWiseCrossAttentionDecoder, DUSt3RAsymmetricCros
 from heads.dpthead import DPTHead
 from depth import DepthEmbedder
 from scannet_dataset_v4 import ScanNetPreprocessor, ScanNetMemoryDataset
-from losses.losses import ConfAlignPointMapRegLoss, ConfAlignDepthRegLoss
+from losses.losses import ConfAlignPointMapRegLoss, ConfAlignDepthRegLoss, ConfAlignPoseLoss
 
 def get_config():
     parser = argparse.ArgumentParser(description='RL')
@@ -161,7 +161,7 @@ class Mov3r:
         )
         return data_loader, sampler
     
-    def get_loss(self, predict_pointmap, predict_depth, depth , intrinsic_depth, weights = [0.01,0.01,1], mask=False):
+    def get_loss(self, predict_pointmap, predict_depth, predicted_quaternion, predicted_translation, quaternion, translation, depth , intrinsic_depth, weights = [0.01,0.01,1], mask=False):
         # Image [B,S,C,H,W ]
         # Depth [B,S, H,W,C]
         # features (B, S, patch_tokens, dim_in)
@@ -174,7 +174,9 @@ class Mov3r:
 
         loss_pointmap = ConfAlignPointMapRegLoss(depth, predict_pointmap, intrinsic_depth, weights[0])
         loss_depth = ConfAlignDepthRegLoss(depth, predict_depth,  weights[1])
-        loss_pose = ConfAlignPoseLoss(pose, predicted_pose)
+
+        ## haven't decoded the predicted pose and converted to quaternion and translation.
+        loss_pose = ConfAlignPoseLoss(quaternion, predicted_quaternion, translation, predicted_translation)
 
         return loss_pointmap + loss_depth
 

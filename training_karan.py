@@ -43,10 +43,10 @@ def get_config():
     parser.add_argument('--patch_size', type=int, default=16)
     parser.add_argument('--img_size', type=int, default=224)
 
-
     parser.add_argument('--dropout', type=float, default=0.5)
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--clip_grad', type=float, default=50.0)
+    parser.add_argument('--clip_grad_norm', type=float, default=5.0)
+    parser.add_argument('--clip_grad_val', type=float, default=10.0)
     parser.add_argument('--weight_decay', type=float, default=1e-5)
     parser.add_argument('--gamma', type=float, default=0.995)
     parser.add_argument('--device_ids', nargs='+', type=int, default=[0, 1, 2], help='List of GPU device IDs')
@@ -295,34 +295,44 @@ class Mov3r:
                 assert rgb.shape[-1] == 3
                 assert depth.shape[-1] == 1
                 assert pred_depth.shape[-1] == 1
+                # Check for NaN/Inf in inputs
+                assert not torch.isnan(rgb).any(), "NaN in RGB inputs"
+                assert torch.isfinite(depth).all(), "Non-finite depth values"
 
-                intrinsic_depth = intrinsic['intrinsic_depth'].to(self.device, non_blocking=True)
-                intrinsic_depth = intrinsic_depth.repeat_interleave(repeats=args.context_length, dim=0)
-                
-                self.optimizer.zero_grad(set_to_none=True)
-                
+                try:
+                    intrinsic_depth = intrinsic['intrinsic_depth'].to(self.device, non_blocking=True)
+                    intrinsic_depth = intrinsic_depth.repeat_interleave(repeats=args.context_length, dim=0)
+                    
+                    self.optimizer.zero_grad(set_to_none=True)
+                    
+                    #calculate loss
+                    loss = self.model.module.loss(rgb, pred_depth, depth, intrinsic_depth, weights = [0.01,0.01,1.0])
+                    
+                    loss.backward()
+                    
+                    # Clip gradients after synchronization
+                    self.g_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=args.clip_grad_norm)
 
-                #calculate loss
-                loss = self.model.module.loss(rgb, pred_depth, depth, intrinsic_depth, weights = [0.01,0.01,1])
-                
-                loss.backward()
-                
-                # Clip gradients after synchronization
-                self.g_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=args.clip_grad)
-                
-                self.optimizer.step()
-                
-                #sync losses across all GPUs
-                loss_tensor = loss.detach().clone()
-                dist.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
-                self.avg_loss = (loss_tensor.item() / dist.get_world_size() + self.avg_loss * batch_idx) / (batch_idx + 1)
-                self.g_norm = (self.g_norm / dist.get_world_size() + self.g_norm * batch_idx) / (batch_idx + 1)
-                epoch_bar.set_postfix(
-                    avg_loss=f'{self.avg_loss:.2f}',
-                    lr=f'{self.optimizer.param_groups[0]["lr"]:.5f}',
-                    grad_norm=f'{self.g_norm:.2f}',
-                )
+                    # #Clip gradient values
+                    # self.g_val = torch.nn.utils.clip_grad_value_(self.model.parameters(), clip_value=args.clip_grad_val)
+
+                    
+                    self.optimizer.step()
+                    
+                    #sync losses across all GPUs
+                    loss_tensor = loss.detach().clone()
+                    dist.all_reduce(loss_tensor, op=torch.distributed.ReduceOp.SUM)
+                    self.avg_loss = (loss_tensor.item() / dist.get_world_size() + self.avg_loss * batch_idx) / (batch_idx + 1)
+                    self.g_norm = (self.g_norm / dist.get_world_size() + self.g_norm * batch_idx) / (batch_idx + 1)
+                    epoch_bar.set_postfix(
+                        avg_loss=f'{self.avg_loss:.2f}',
+                        lr=f'{self.optimizer.param_groups[0]["lr"]:.5f}',
+                        grad_norm=f'{self.g_norm:.2f}',
+                    )
             
+                except Exception as e:
+                    print(f"Error in batch {batch_idx}: {e}")
+                    print(f"Skipping batch {batch_idx} due to error.")
             if epoch % args.save_after == 0 and self.local_rank == 0:
                 self.save_checkpoint(epoch)
             

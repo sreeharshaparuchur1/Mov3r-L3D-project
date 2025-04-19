@@ -154,9 +154,9 @@ class ScanNetPreprocessor:
             
             pred_depth_path = os.path.join('output_depth_maps', os.path.basename(scene_dir), f'{frame_id}.npz')
             pred_depthmap = np.load(pred_depth_path)
-            pred_depthmap = pred_depthmap['depth'].astype(np.float32) / 1000
+            pred_depthmap = pred_depthmap['depth'].astype(np.float32) / 255
             pred_depthmap = pred_depthmap[:, :, None]
-            # pred_depthmap[~np.isfinite(pred_depthmap)] = 0
+            pred_depthmap[~np.isfinite(pred_depthmap)] = 0
             frame_data['pred_depth'] = pred_depthmap
 
             # Load pose

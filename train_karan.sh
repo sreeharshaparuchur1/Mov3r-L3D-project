@@ -6,9 +6,9 @@
 #
 #!/bin/bash
 
-CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 --master_port=29513 training_karan.py \
-    --run_name train_embed_v6 \
-    --max_scenes 10\
+CUDA_VISIBLE_DEVICES=1 python -m torch.distributed.run --nproc_per_node=1 --master_port=29513 training_karan.py \
+    --run_name train_embed_debug \
+    --max_scenes 2\
     --num_epochs 1000 \
     --batch_size 4 \
     --context_length 16\
@@ -31,6 +31,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 
     --gamma 0.995\
     --weight_decay 1e-5\
     --pc_dec_depth 8 \
+    --alpha_pointmap 0.5\
+    --alpha_depth 0.5\
+    --eps 1e-6\
     --seed 9 \
     --save_after 10\
     --depth_embedder ./pretrained_weights/align3r_depthanything.pth \
@@ -39,7 +42,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 
     --model_dir ./models/ \
     --ckpt_dir ./ckpt/ \
     --eval_model ./models/model_20.pth \
-    --dataset_path /data/kmirakho/l3d_proj/scannetv2 \
+    --dataset_path /data/kmirakho/l3d_proj/scannetv4 \
     # --load_from_ckpt ./ckpt/train_embed_smallv3/checkpoint-0.pth \
     # --run_eval \
     # --load_model \

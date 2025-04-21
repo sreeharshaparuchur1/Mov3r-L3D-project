@@ -28,13 +28,13 @@ class RoPE2D(nn.Module):
         freqs = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
         t = torch.arange(self.max_seq_len).type_as(freqs)
         freqs = torch.outer(t, freqs)
-        return torch.cos(freqs).view(self.max_seq_len, 1, self.dim // 2).repeat(1, 1, 2).contiguous()
+        return torch.cos(freqs).unsqueeze(1).repeat(1, 1, 2).contiguous()
     
     def _compute_sin_cached(self):
         freqs = 1.0 / (self.base ** (torch.arange(0, self.dim, 2).float() / self.dim))
         t = torch.arange(self.max_seq_len).type_as(freqs)
         freqs = torch.outer(t, freqs)
-        return torch.sin(freqs).view(self.max_seq_len, 1, self.dim // 2).repeat(1, 1, 2).contiguous()
+        return torch.sin(freqs).unsqueeze(1).repeat(1, 1, 2).contiguous()
     
     def forward(self, x, seq_idx):
         # x: [batch_size, seq_len, dim]
@@ -50,7 +50,7 @@ class RoPE2D(nn.Module):
         # Split embedding into half for rotation
         x_half = x.view(batch_size, seq_len, -1, 2).contiguous()
         x_half_rot = torch.stack([-x_half[..., 1], x_half[..., 0]], dim=-1)
-        x_rot = x_half_rot.reshape(batch_size, seq_len, -1)
+        x_rot = x_half_rot.view(batch_size, seq_len, -1).contiguous()
         
         # Apply rotary embeddings
         return x * cos + x_rot * sin
@@ -393,3 +393,74 @@ class DUSt3RAsymmetricCrossAttention_masked(nn.Module):
             x1 = x1_new
 
         return x1
+    
+class CausalSelfAttention_masked(nn.Module):
+    def __init__(self, dim, seq_len=None, num_heads=8, dropout=0.0, use_rope=False):
+        super().__init__()
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.scale = self.head_dim ** -0.5
+
+        self.to_q = nn.Linear(dim, dim, bias=False)
+        self.to_k = nn.Linear(dim, dim, bias=False)
+        self.to_v = nn.Linear(dim, dim, bias=False)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(dim, dim),
+            nn.Dropout(dropout)
+        )
+
+        self.use_rope = use_rope
+        if use_rope:
+            self.rope = RoPE2D(dim // num_heads)
+        
+        if seq_len is not None:
+            self.register_buffer("mask", torch.tril(torch.ones(seq_len, seq_len))
+                                    .view(1, 1, seq_len, seq_len))
+        else:
+            self.mask = None
+
+    def forward(self, x, pad_mask=None):
+        """
+        Args:
+            x: (B, S, D)
+            mask: (B, S), True for valid, False for pad
+        """
+        B, S, D = x.shape
+        
+        q = self.to_q(x)
+        k = self.to_k(x)
+        v = self.to_v(x) # (B, S, D)
+
+        q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads) # (B, H, S, D//H)
+        k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads)
+        v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads)
+
+        if self.use_rope:
+            pos_q = torch.arange(S, device=x.device)
+            pos_k = torch.arange(S, device=x.device)
+            q = rearrange(q, 'b h n d -> (b h) n d')
+            k = rearrange(k, 'b h n d -> (b h) n d')
+            q = self.rope(q, pos_q)
+            k = self.rope(k, pos_k)
+            q = rearrange(q, '(b h) n d -> b h n d', h=self.num_heads)
+            k = rearrange(k, '(b h) n d -> b h n d', h=self.num_heads)
+
+        attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
+
+        if self.mask is not None:
+            attn = attn.masked_fill(self.mask[:, :, :S, :S] == 0, float('-inf'))
+        else:
+            # Causal mask created on the fly for global memory
+            mask = torch.tril(torch.ones(S, S, device=x.device)).unsqueeze(0).unsqueeze(0)
+            attn = attn.masked_fill(mask == 0, float('-inf'))
+        # Apply padding mask
+        if pad_mask is not None:
+            # pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
+            attn = attn.masked_fill(pad_mask.unsqueeze(1).unsqueeze(2) == 0, float('-inf'))
+        
+        attn = F.softmax(attn, dim=-1)
+
+        out = torch.matmul(attn, v)
+        out = rearrange(out, 'b h n d -> b n (h d)')
+        return self.to_out(out)

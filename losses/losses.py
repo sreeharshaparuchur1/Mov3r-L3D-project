@@ -20,6 +20,7 @@ def ConfAlignPointMapRegLoss(gt_batch, prediction, intrinsics, alpha=0.01, eps=1
     Returns:
         Scalar loss.
     """
+
     prediction_pm = prediction[0]
     prediction_pm_c = prediction[1]
 
@@ -76,6 +77,7 @@ def ConfAlignPointMapRegLoss(gt_batch, prediction, intrinsics, alpha=0.01, eps=1
     #assert loss is not NaN
     assert torch.all(torch.isfinite(total_loss)) #Loss contains NaN or Inf values"
     return total_loss.mean()
+    # return total_loss
 
 def ConfAlignDepthRegLoss(gt_batch, prediction, alpha=0.01, eps=1e-6):
     """
@@ -92,27 +94,30 @@ def ConfAlignDepthRegLoss(gt_batch, prediction, alpha=0.01, eps=1e-6):
     Returns:
         Scalar loss.
     """
+
     prediction_d = prediction[0]
     prediction_d_c = prediction[1]
-    prediction_d_c = torch.clamp(prediction_d_c, min=0.01)  # avoid log(0)
+
+    prediction_d_c = torch.clamp(prediction_d_c, min=eps)  # avoid log(0)
+    
     
     x_hat = prediction_d       # Predicted Depth
-    c = prediction_d_c  # Confidence, keep dimensions [B, K, H, W, 1]
+    conf = prediction_d_c  # Confidence, keep dimensions [B, K, H, W, 1]
     mask_x_hat = torch.isfinite(x_hat)  # Mask for predicted depth
     mask_x_hat_c = torch.isfinite(prediction_d_c)  # Mask for predicted confidence
 
-    c = mask_x_hat_c * prediction_d_c  # Apply mask to confidence
-    c = torch.clamp(c, min=eps)  # Avoid log(0)
+    conf = mask_x_hat_c * prediction_d_c  # Apply mask to confidence
+    # conf = torch.clamp(conf, min=eps)  # Avoid log(0)
 
     gt = gt_batch                      # Ground truth Depth
     mask_gt = torch.isfinite(gt)       # Mask for ground truth depth
-
+    
     # Assuming scale is 1, alignment term becomes simple L2 diff weighted by confidence
     diff = (x_hat - gt)*mask_x_hat*mask_gt                  # [B, K, H, W, 1]
-    loss_data = c * (diff ** 2)       # Confidence-weighted squared error
+    loss_data = conf * (diff ** 2)       # Confidence-weighted squared error
 
     # Confidence regularization: -α log(c)
-    conf_reg = -alpha * torch.log(c)
+    conf_reg = -alpha * torch.log(conf)
 
     total_loss = loss_data + conf_reg # [B, K, H, W, 1]
     assert torch.all(torch.isfinite(total_loss)) #Loss contains NaN or Inf values

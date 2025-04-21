@@ -6,9 +6,9 @@
 #
 #!/bin/bash
 
-CUDA_VISIBLE_DEVICES=1 python -m torch.distributed.run --nproc_per_node=1 --master_port=29513 training_karan.py \
-    --run_name train_embed_debug \
-    --max_scenes 2\
+CUDA_VISIBLE_DEVICES=0,1,2,3 python -m torch.distributed.run --nproc_per_node=4 --master_port=29513 training_karan.py \
+    --run_name train_embed_new-V4 \
+    --max_scenes 10\
     --num_epochs 1000 \
     --batch_size 4 \
     --context_length 16\
@@ -42,6 +42,7 @@ CUDA_VISIBLE_DEVICES=1 python -m torch.distributed.run --nproc_per_node=1 --mast
     --model_dir ./models/ \
     --ckpt_dir ./ckpt/ \
     --eval_model ./models/model_20.pth \
+    --eval_after 5\
     --dataset_path /data/kmirakho/l3d_proj/scannetv4 \
     # --load_from_ckpt ./ckpt/train_embed_smallv3/checkpoint-0.pth \
     # --run_eval \

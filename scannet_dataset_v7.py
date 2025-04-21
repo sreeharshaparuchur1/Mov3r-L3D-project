@@ -352,7 +352,7 @@ class BufferedSceneDataset(Dataset):
         new_data = self._load_scene_batch(next_indices)
         dataset = ScanNetMemoryDataset(
             dataset_source=new_data,
-            num_frames=1,
+            num_frames=self.num_frames,
             transforms=self.data_transforms,
             frame_skip=self.frame_skip,
             rgb_only=False

@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import math
 from einops import rearrange
+import pdb
 
 
 class RoPE2D(nn.Module):
@@ -258,6 +259,9 @@ class DUSt3RAsymmetricCrossAttention(nn.Module):
             for _ in range(depth)
         ])
         
+        self.cls_token = nn.Parameter(torch.zeros(1, 1, decoder_dim))
+
+
         # self.dec_blocks2 = nn.ModuleList([
         #     CrossBlock(decoder_dim, num_heads, 4.0, dropout)
         #     for _ in range(depth)
@@ -268,6 +272,10 @@ class DUSt3RAsymmetricCrossAttention(nn.Module):
         x1: tokens from first view [batch_size, seq_len, encoder_dim]
         x2: tokens from second view [batch_size, seq_len, encoder_dim]
         """
+        B = feat_depth.shape[0]
+        cls_token = self.cls_token.expand(B, 1, -1)  # [batch_size, 1, decoder_dim]
+        feat_depth = torch.cat([cls_token, feat_depth], dim=1)
+
         # Project to decoder dimension
         x1 = self.decoder_embed(feat_depth)
         x2 = self.decoder_embed(feat_rgb)
@@ -394,25 +402,25 @@ class DUSt3RAsymmetricCrossAttention_masked(nn.Module):
 
         return x1
     
-class CausalSelfAttention_masked(nn.Module):
-    def __init__(self, dim, seq_len=None, num_heads=8, dropout=0.0, use_rope=False):
+class CausalSelfAttentionMasked(nn.Module):
+    def __init__(self, encoder_dim, seq_len=None, num_heads=8, dropout=0.0, use_rope=False):
         super().__init__()
         self.num_heads = num_heads
-        self.head_dim = dim // num_heads
+        self.head_dim = encoder_dim // num_heads
         self.scale = self.head_dim ** -0.5
 
-        self.to_q = nn.Linear(dim, dim, bias=False)
-        self.to_k = nn.Linear(dim, dim, bias=False)
-        self.to_v = nn.Linear(dim, dim, bias=False)
+        self.to_q = nn.Linear(encoder_dim, encoder_dim, bias=False)
+        self.to_k = nn.Linear(encoder_dim, encoder_dim, bias=False)
+        self.to_v = nn.Linear(encoder_dim, encoder_dim, bias=False)
 
         self.to_out = nn.Sequential(
-            nn.Linear(dim, dim),
+            nn.Linear(encoder_dim, encoder_dim),
             nn.Dropout(dropout)
         )
 
         self.use_rope = use_rope
         if use_rope:
-            self.rope = RoPE2D(dim // num_heads)
+            self.rope = RoPE2D(encoder_dim // num_heads)
         
         if seq_len is not None:
             self.register_buffer("mask", torch.tril(torch.ones(seq_len, seq_len))
@@ -435,6 +443,10 @@ class CausalSelfAttention_masked(nn.Module):
         q = rearrange(q, 'b n (h d) -> b h n d', h=self.num_heads) # (B, H, S, D//H)
         k = rearrange(k, 'b n (h d) -> b h n d', h=self.num_heads)
         v = rearrange(v, 'b n (h d) -> b h n d', h=self.num_heads)
+        
+        assert not torch.isnan(q).any(), "NaN in q"
+        assert not torch.isnan(k).any(), "NaN in k"
+        assert not torch.isnan(v).any(), "NaN in v"
 
         if self.use_rope:
             pos_q = torch.arange(S, device=x.device)
@@ -445,22 +457,79 @@ class CausalSelfAttention_masked(nn.Module):
             k = self.rope(k, pos_k)
             q = rearrange(q, '(b h) n d -> b h n d', h=self.num_heads)
             k = rearrange(k, '(b h) n d -> b h n d', h=self.num_heads)
-
+        
         attn = torch.matmul(q, k.transpose(-2, -1)) * self.scale
 
         if self.mask is not None:
             attn = attn.masked_fill(self.mask[:, :, :S, :S] == 0, float('-inf'))
         else:
             # Causal mask created on the fly for global memory
-            mask = torch.tril(torch.ones(S, S, device=x.device)).unsqueeze(0).unsqueeze(0)
+            mask = torch.tril(torch.ones(S, S, device=x.device)).unsqueeze(0).unsqueeze(0).to(x.device)
             attn = attn.masked_fill(mask == 0, float('-inf'))
         # Apply padding mask
         if pad_mask is not None:
-            # pad_mask = pad_mask.unsqueeze(1).unsqueeze(2)
-            attn = attn.masked_fill(pad_mask.unsqueeze(1).unsqueeze(2) == 0, float('-inf'))
+            pad_mask = pad_mask.to(torch.float) # 
+            pad_mask = pad_mask.unsqueeze(-2)
+            pad_mask = torch.matmul(pad_mask.permute(0,2,1), pad_mask).unsqueeze(1) # B, 1, S, S
+            attn = attn.masked_fill(pad_mask == 0, float('-inf')).to(x.device)
+
+
+        # Handle rows with all -inf
+        inf_mask = torch.isinf(attn)
+        all_inf = inf_mask.all(dim=-1, keepdim=True)
         
         attn = F.softmax(attn, dim=-1)
-
+        attn = attn.masked_fill(all_inf, 0.0) #check for attn[7,0]
+        
         out = torch.matmul(attn, v)
         out = rearrange(out, 'b h n d -> b n (h d)')
+        assert torch.all(torch.isfinite(out)), "self_attn output is not finite"
         return self.to_out(out)
+
+class CausalSelfAttentionBlockMasked(nn.Module):
+    def __init__(self, encoder_dim, seq_len=None, num_heads=8, dropout=0.0, mlp_ratio =4, use_rope=False):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(encoder_dim)
+        self.self_attn = CausalSelfAttentionMasked(encoder_dim, seq_len, num_heads, dropout=dropout, use_rope=use_rope)
+
+        self.norm2 = nn.LayerNorm(encoder_dim)
+        mlp_hidden_dim = int(encoder_dim * mlp_ratio)
+        self.mlp = nn.Sequential(
+            nn.Linear(encoder_dim, mlp_hidden_dim),
+            nn.GELU(),
+            nn.Dropout(dropout),
+            nn.Linear(mlp_hidden_dim, encoder_dim),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x, pad_mask=None):
+        residual = x
+        x = self.norm1(x)
+        x_attn = self.self_attn(x, pad_mask)
+        x = residual + x_attn
+
+        residual = x
+        x = self.norm2(x)
+        x = residual + self.mlp(x)
+        
+        return x        
+
+class CausalSelfAttention_masked(nn.Module):
+    def __init__(self, encoder_dim, seq_len=None, depth=4, num_heads=8, dropout=0.0, use_rope=False):
+        super().__init__()
+        self.dec_blocks = nn.ModuleList([
+            CausalSelfAttentionBlockMasked(encoder_dim, seq_len, num_heads, dropout, use_rope=use_rope)
+            for _ in range(depth)
+        ])
+
+    def forward(self, x, pad_mask=None):
+        #TODO linear proj here?
+        for block in self.dec_blocks:
+            try:
+                x = block(x, pad_mask)
+            except Exception as e:
+                print("NAN aagaya!!!")
+                print(f"Caught exception: {e}")
+                pdb.set_trace()
+                x = block(x, pad_mask)
+        return x

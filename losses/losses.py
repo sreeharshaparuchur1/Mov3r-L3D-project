@@ -123,30 +123,32 @@ def ConfAlignDepthRegLoss(gt_batch, prediction, alpha=0.01, eps=1e-6):
     assert torch.all(torch.isfinite(total_loss)) #Loss contains NaN or Inf values
     return total_loss.mean()
 
-def ConfAlignPoseLoss(gt_quat, predict_quat, gt_trans, predict_trans):
-        # [B, K, H, W, 1]
+def PoseLoss(gt_pose, predict_pose): #, gt_trans, predict_trans):
+        # [B, S, 7]
         # assert -> Any assert for shape check here?
-        loss = torch.norm(gt_quat - predict_quat)
-        loss += torch.norm(gt_trans - predict_trans)
-        return torch.sum(loss, dim=1).mean() 
+        loss = F.mse_loss(predict_pose, gt_pose, reduction='sum')
+        return loss 
 
 def test_losses():
-    B, K, H, W = 2, 3, 64, 64
+    B, K, H, W = 4, 3, 64, 64
 
     # ----- Test ConfAlignPointMapRegLoss -----
     # Simulated intrinsics [B, K, 3, 4] (fx, fy = 100, cx, cy = W/2, H/2)
-    intrinsics = torch.zeros(B, K, 3, 4)
+    intrinsics = torch.zeros(B, K, 4, 4)
     intrinsics[:, :, 0, 0] = 1  # fx
     intrinsics[:, :, 1, 1] = 1  # fy
     intrinsics[:, :, 0, 2] = W / 2  # cx
     intrinsics[:, :, 1, 2] = H / 2  # cy
-    
+    intrinsics[:, :, 3, 3] = 1
     # Ground truth depth
     depth_gt = torch.rand(B, K, H, W, 1) * 5.0  # depth in range [0, 5]
 
     # Predicted: [x, y, z, confidence]
-    pred = torch.rand(B, K, H, W, 4)
-    pred[..., 3] = torch.clamp(pred[..., 3], min=0.01)  # avoid log(0)
+    # pred = torch.rand(B, K, H, W, 4)
+    # pred[..., 3] = torch.clamp(pred[..., 3], min=0.01)  # avoid log(0)
+    
+    pred = torch.rand(2, B, K, H, W, 3)
+    pred[1, ...] = torch.clamp(pred[1, ...], min=0.01)  # avoid log(0)
 
     # Run the loss
     loss = ConfAlignPointMapRegLoss(depth_gt, pred, intrinsics)

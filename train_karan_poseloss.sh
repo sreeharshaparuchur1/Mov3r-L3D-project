@@ -1,0 +1,86 @@
+# Copyright (c) Facebook, Inc. and its affiliates.
+# All rights reserved.
+#
+# This source code is licensed under the license found in the
+# LICENSE file in the root directory of this source tree.
+#
+#!/bin/bash
+
+CUDA_VISIBLE_DEVICES=0 python -m torch.distributed.run --nproc_per_node=1 --master_port=29513 training_karan_poseloss.py \
+    --run_name train_embed_new-V4 \
+    --max_scenes 1\
+    --num_epochs 1000 \
+    --batch_size 4 \
+    --context_length 16\
+    --num_heads 8 \
+    --num_heads 8 \
+    --img_size 224 \
+    --ds_num_workers 8\
+    --dl_num_workers 4 \
+    --prefetch_factor 8\
+    --embed_dim 768 \
+    --encoder_dim 768 \
+    --decoder_dim 768 \
+    --load_after 5\
+    --frame_skip 5\
+    --ca_depth 4 \
+    --patch_size 16 \
+    --dropout 0.4 \
+    --clip_grad_norm 5.0 \
+    --clip_grad_val 10.0 \
+    --lr 1e-4 \
+    --gamma 0.995\
+    --weight_decay 1e-5\
+    --pc_dec_depth 8 \
+    --alpha_pointmap 0.5\
+    --alpha_depth 0.5\
+    --w_pose 1\
+    --w_depth 1\
+    --w_pm 1\
+    --sim_th 0.5\
+    --cls_pose True\
+    --eps 1e-6\
+    --seed 9 \
+    --save_after 10\
+    --depth_embedder ./pretrained_weights/align3r_depthanything.pth \
+    --dino_encoder ./pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
+    --log_dir ./logs/ \
+    --model_dir ./models/ \
+    --ckpt_dir ./ckpt/ \
+    --eval_model ./models/model_20.pth \
+    --eval_after 5\
+    --dataset_path /data/kmirakho/l3d_proj/scannetv4 \
+    # --load_from_ckpt ./ckpt/train_embed_smallv3/checkpoint-0.pth \
+    # --run_eval \
+    # --load_model \
+
+# python -m torch.distributed.run --nproc_per_node=1 --master_port=29501 training.py \
+#     --run_name train_embedding \
+#     --num_epochs 1000 \
+#     --batch_size 4 \
+#     --context_length 16\
+#     --max_scenes 2\
+#     --embed_dim 768 \
+#     --encoder_dim 768 \
+#     --decoder_dim 768 \
+#     --num_heads 8 \
+#     --ds_num_workers 8\
+#     --dl_num_workers 4 \
+#     --prefetch_factor 8\
+#     --load_after 5\
+#     --frame_skip 5\
+#     --dropout 0.4 \
+#     --ca_depth 4 \
+#     --patch_size 16 \
+#     --lr 5e-4 \
+#     --gamma 0.999\
+#     --seed 9 \
+#     --save_after 50\
+#     --device_ids 1\
+#     --dino_encoder ./pretrained_weights/dinov2_vitb14_reg4_pretrain.pth \
+#     --log_dir ./logs/ \
+#     --model_dir ./models/ \
+#     --eval_model ./models/model_20.pth \
+#     --dataset_path /data/kmirakho/l3d_proj/scannetv2 \
+#     # --run_eval \
+#     # --load_model \

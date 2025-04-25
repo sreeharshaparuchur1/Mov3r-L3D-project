@@ -175,7 +175,25 @@ class UnifiedModel(torch.nn.Module):
         predict_depth, predict_pointmap, predict_pose = self.forward(rgb, pred_depth, intrinsic_depth)
         
         depth = depth.view(B, S, H, W, C).contiguous()
-        pose = torch.cat([mat_to_quat(pose[..., :3,:3]), pose[..., -1, :3]], dim=-1)
+        pose_init = pose[:,0] #T_w<-c0
+        
+        #[R|t]^(-1) = [R.T | -R.T@t]
+        R_inv = pose_init[: , :3, :3].permute(0,2,1)
+        t_inv = -R_inv@pose_init[:, :-1, -1].unsqueeze(-1)
+        pose_init_inv = torch.cat([R_inv, t_inv], dim=-1)# T_c0<-w
+        pose_init_inv = pose_init_inv.unsqueeze(1) #B, 1, 4, 4
+
+        pose_init_inv_ones = torch.tensor([0.,0.,0.,1.]).repeat(B, 1).to(pose.device)
+        pose_init_inv_ones = pose_init_inv_ones.unsqueeze(1).unsqueeze(2)
+        pose_init_inv = torch.cat([pose_init_inv, pose_init_inv_ones], dim=-2)
+        pose_mod = pose_init_inv@pose # T_c0<-ci = T_c0<-w x T_w-<ci
+        
+        gt_pose = torch.cat([mat_to_quat(pose_mod[..., :3,:3]), pose_mod[..., -1, :3]], dim=-1)
+
+        # gt_init: R_w<-c0
+        # R_c0<-w: (R_w<-c0)^-1
+        # gt_mod: R_c0<-w*R_w<-ci
+        # T_c0<-w: (T_w<-c0)^-1 = [T_w<-c0[:3,:3].T, -T_w<-c0[:3,:3].T@T_w<-c0[:3,3]] 
 
         assert depth.shape[-1] == 1
         assert intrinsic_depth.shape[-1] == 4
@@ -184,7 +202,7 @@ class UnifiedModel(torch.nn.Module):
 
         loss_pointmap = ConfAlignPointMapRegLoss(depth, predict_pointmap, intrinsic_depth, alpha = args.alpha_pointmap, eps=args.eps)
         loss_depth = ConfAlignDepthRegLoss(depth, predict_depth,  alpha = args.alpha_depth, eps=args.eps)
-        loss_pose = PoseLoss(pose, predict_pose)
+        loss_pose = PoseLoss(gt_pose, predict_pose)
         return loss_pointmap, loss_depth, loss_pose
 
 class Mov3r:
